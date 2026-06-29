@@ -7,14 +7,17 @@ import Routes from "./routes/Routes.js";
 dotenv.config();
 
 const app = express();
+app.disable("x-powered-by");
 
-const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:5173")
-  .split(",")
-  .map((o) => o.trim());
+const allowedOrigins = new Set(
+  (process.env.CORS_ORIGIN || "http://localhost:5173")
+    .split(",")
+    .map((o) => o.trim())
+);
 
 const corsOptions = {
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin || allowedOrigins.has(origin)) {
       callback(null, true);
     } else {
       callback(new Error("Not allowed by CORS"));
@@ -25,10 +28,14 @@ const corsOptions = {
   allowedHeaders: ["Content-Type", "Authorization"],
 };
 
-app.options("*", cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(cors(corsOptions));
 app.use(cookieParser());
 app.use(express.json());
+
+app.get("/api/healthcheck", (req, res) => {
+  res.json({ status: "ok" });
+});
 
 // Routing
 app.use(Routes);
