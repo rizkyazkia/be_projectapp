@@ -1,5 +1,7 @@
-import { GENDER, PrismaClient } from "@prisma/client";
+import pkg from "@prisma/client";
+const { PrismaClient } = pkg;
 
+const GENDER = { L: "L", P: "P" };
 const prisma = new PrismaClient();
 
 export const seedIMT = async () => {
