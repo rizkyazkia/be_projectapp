@@ -17,6 +17,7 @@
   "description": "",
   "dependencies": {
     "@prisma/client": "^6.8.2",
+    "prisma": "^6.8.2",
     "argon2": "^0.43.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
@@ -27,7 +28,5 @@
     "mysql2": "^3.14.0",
     "nodemon": "^3.1.10"
   },
-  "devDependencies": {
-    "prisma": "^6.8.2"
-  }
+  "devDependencies": {}
 }
