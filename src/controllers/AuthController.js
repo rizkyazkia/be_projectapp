@@ -197,6 +197,8 @@ export const login = async (req, res) => {
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
       maxAge: 24 * 60 * 60 * 1000,
+      secure: true,
+      sameSite: "none",
     });
     return successResponse(res, { accessToken }, "Login berhasil");
   } catch (error) {
@@ -230,6 +232,6 @@ export const logout = async (req, res) => {
       refresh_token: null,
     },
   });
-  res.clearCookie("refreshToken");
+  res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "none" });
   return successResponse(res, null, "Logout berhasil");
 };
