@@ -11,7 +11,7 @@ const app = express();
 // Middleware
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: process.env.CORS_ORIGIN || "http://localhost:5173",
     credentials: true,
   })
 );
@@ -21,6 +21,7 @@ app.use(express.json());
 // Routing
 app.use(Routes);
 
-app.listen(process.env.API_PORT, () => {
-  console.log(`Server is running on port ${process.env.API_PORT}`);
+const PORT = process.env.PORT || process.env.API_PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
 });

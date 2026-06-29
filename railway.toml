@@ -1,0 +1,8 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "npx prisma migrate deploy && node src/index.js"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10
