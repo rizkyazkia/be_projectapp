@@ -176,7 +176,7 @@ export const login = async (req, res) => {
       { id, username, email, role: roleName },
       process.env.APP_ACCESS_TOKEN_SECRET,
       {
-        expiresIn: process.env?.NODE_ENV === "production" ? "20s" : 3600 * 3,
+        expiresIn: "15m",
       }
     );
     const refreshToken = jwt.sign(
