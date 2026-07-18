@@ -1,21 +1,30 @@
-import pkg from "@prisma/client";
-const { PrismaClient } = pkg;
+import pool from "../../src/config/db.js";
 
 const GENDER = { L: "L", P: "P" };
-const prisma = new PrismaClient();
 
 export const seedIMT = async () => {
   try {
-    const count = await prisma.bmiReference.count();
+    const [[{ count }]] = await pool.query(
+      "SELECT COUNT(*) AS count FROM bmi_references",
+    );
 
     if (count > 0) {
       console.log("BMI Reference already exists");
       return;
     }
 
-    await prisma.bmiReference.createMany({
-      data: bmiReferences,
-    });
+    const columns = [
+      "ageYear", "ageMonthFrom", "ageMonthTo", "gender",
+      "sdMinus3Min", "sdMinus3Max", "sdMinus2Min", "sdMinus2Max",
+      "sdMinus1Min", "sdMinus1Max", "medianMin", "medianMax",
+      "sdPlus1Min", "sdPlus1Max", "sdPlus2Min", "sdPlus2Max",
+      "sdPlus3Min", "sdPlus3Max",
+    ];
+
+    await pool.query(
+      `INSERT INTO bmi_references (${columns.join(", ")}) VALUES ?`,
+      [bmiReferences.map((r) => columns.map((c) => r[c]))],
+    );
 
     console.log("BMI Reference seeded successfully");
   } catch (error) {

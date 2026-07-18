@@ -1,35 +1,33 @@
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import pool from "../../src/config/db.js";
 
 export const seedJobTypes = async () => {
   try {
-    const existingJobTypes = await prisma.jobType.findMany({
-      where: {
-        OR: [
-          { name: "Tidak Bekerja" },
-          { name: "Buruh" },
-          { name: "Karyawan Swasta" },
-          { name: "ASN / BUMN" },
-          { name: "Wiraswasta" },
-        ],
-      },
-    });
+    const names = [
+      "Tidak Bekerja",
+      "Buruh",
+      "Karyawan Swasta",
+      "ASN / BUMN",
+      "Wiraswasta",
+    ];
+    const [existingJobTypes] = await pool.query(
+      "SELECT id FROM job_types WHERE name IN (?)",
+      [names],
+    );
 
     if (existingJobTypes.length > 0) {
       console.log("Job types already exist");
       return;
     }
 
-    await prisma.jobType.createMany({
-      data: [
-        { name: "Tidak Bekerja", type: "TIDAK_BEKERJA" },
-        { name: "Buruh", type: "BURUH" },
-        { name: "Karyawan Swasta", type: "KARYAWAN_SWASTA" },
-        { name: "ASN / BUMN", type: "ASN_BUMN" },
-        { name: "Wiraswasta", type: "WIRASWASTA" },
+    await pool.query("INSERT INTO job_types (name, type) VALUES ?", [
+      [
+        ["Tidak Bekerja", "TIDAK_BEKERJA"],
+        ["Buruh", "BURUH"],
+        ["Karyawan Swasta", "KARYAWAN_SWASTA"],
+        ["ASN / BUMN", "ASN_BUMN"],
+        ["Wiraswasta", "WIRASWASTA"],
       ],
-    });
+    ]);
     console.log("Job types seeded successfully");
   } catch (error) {
     console.error(error);

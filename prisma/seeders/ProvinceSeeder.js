@@ -1,25 +1,18 @@
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import pool from "../../src/config/db.js";
 
 export const seedProvince = async () => {
   try {
-    const existingProvince = await prisma.province.findFirst({
-      where: {
-        name: "DKI Jakarta",
-      },
-    });
+    const [existingProvince] = await pool.query(
+      "SELECT id FROM provinces WHERE name = ? LIMIT 1",
+      ["DKI Jakarta"],
+    );
 
-    if (existingProvince) {
+    if (existingProvince.length > 0) {
       console.log("Province already exists");
       return;
     }
 
-    await prisma.province.create({
-      data: {
-        name: "DKI Jakarta",
-      },
-    });
+    await pool.query("INSERT INTO provinces (name) VALUES (?)", ["DKI Jakarta"]);
     console.log("Province seeded successfully");
   } catch (error) {
     console.error(error.message);

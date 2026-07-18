@@ -1,40 +1,29 @@
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import pool from "../../src/config/db.js";
 
 export const seedCategories = async () => {
   try {
-    const existingCategories = await prisma.category.findMany({
-      where: {
-        OR: [
-          { name: "Tingkat Pengetahuan Gizi Seimbang" },
-          { name: "Kebiasaan Sehari-hari Anak" },
-          { name: "Pelayanan Kesehatan Sekolah" },
-        ],
-      },
-    });
+    const names = [
+      "Tingkat Pengetahuan Gizi Seimbang",
+      "Kebiasaan Sehari-hari Anak",
+      "Pelayanan Kesehatan Sekolah",
+    ];
+    const [existingCategories] = await pool.query(
+      "SELECT id FROM categories WHERE name IN (?)",
+      [names],
+    );
 
     if (existingCategories.length > 0) {
       console.log("Categories already exist");
       return;
     }
 
-    await prisma.category.createMany({
-      data: [
-        {
-          name: "Tingkat Pengetahuan Gizi Seimbang",
-          path: "/tingkat-pengetahuan-gizi-seimbang",
-        },
-        {
-          name: "Kebiasaan Sehari-hari Anak",
-          path: "/kebiasaan-sehari-hari-anak",
-        },
-        {
-          name: "Pelayanan Kesehatan Sekolah",
-          path: "/pelayanan-kesehatan-sekolah",
-        },
+    await pool.query("INSERT INTO categories (name, path) VALUES ?", [
+      [
+        ["Tingkat Pengetahuan Gizi Seimbang", "/tingkat-pengetahuan-gizi-seimbang"],
+        ["Kebiasaan Sehari-hari Anak", "/kebiasaan-sehari-hari-anak"],
+        ["Pelayanan Kesehatan Sekolah", "/pelayanan-kesehatan-sekolah"],
       ],
-    });
+    ]);
     console.log("Categories seeded successfully");
   } catch (error) {
     console.error(error);

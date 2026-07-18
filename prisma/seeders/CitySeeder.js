@@ -1,37 +1,28 @@
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import pool from "../../src/config/db.js";
 
 export const seedCity = async () => {
   try {
-    const existingCity = await prisma.city.findMany({
-      where: {
-        OR: [
-          { name: "Kepulauan Seribu" },
-          { name: "Jakarta Barat" },
-          { name: "Jakarta Pusat" },
-          { name: "Jakarta Selatan" },
-          { name: "Jakarta Timur" },
-          { name: "Jakarta Utara" },
-        ],
-      },
-    });
+    const names = [
+      "Kepulauan Seribu",
+      "Jakarta Barat",
+      "Jakarta Pusat",
+      "Jakarta Selatan",
+      "Jakarta Timur",
+      "Jakarta Utara",
+    ];
+    const [existingCity] = await pool.query(
+      "SELECT id FROM cities WHERE name IN (?)",
+      [names],
+    );
 
     if (existingCity.length > 0) {
       console.log("City already exists");
       return;
     }
 
-    await prisma.city.createMany({
-      data: [
-        { name: "Kepulauan Seribu", province_id: 1 },
-        { name: "Jakarta Barat", province_id: 1 },
-        { name: "Jakarta Pusat", province_id: 1 },
-        { name: "Jakarta Selatan", province_id: 1 },
-        { name: "Jakarta Timur", province_id: 1 },
-        { name: "Jakarta Utara", province_id: 1 },
-      ],
-    });
+    await pool.query("INSERT INTO cities (name, province_id) VALUES ?", [
+      names.map((name) => [name, 1]),
+    ]);
     console.log("City seeded successfully");
   } catch (error) {
     console.error(error);

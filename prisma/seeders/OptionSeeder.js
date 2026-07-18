@@ -1,32 +1,21 @@
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import pool from "../../src/config/db.js";
 
 export const seedOptions = async () => {
   try {
-    const existingOptions = await prisma.option.findMany({
-      where: {
-        OR: [
-          { title: "Benar" },
-          { title: "Salah" },
-          { title: "1" },
-          { title: "2" },
-          { title: "3" },
-          { title: "4" },
-          { title: "0" },
-        ],
-      },
-    });
+    const existingTitles = ["Benar", "Salah", "1", "2", "3", "4", "0"];
+    const [existingOptions] = await pool.query(
+      "SELECT id FROM options WHERE title IN (?)",
+      [existingTitles],
+    );
 
     if (existingOptions.length > 0) {
       console.log("Options already exist");
       return;
     }
 
-    const questions = await prisma.question.findMany({
-      select: { id: true, is_negative: true },
-      orderBy: { id: "asc" },
-    });
+    const [questions] = await pool.query(
+      "SELECT id, is_negative FROM questions ORDER BY id ASC",
+    );
 
     const booleanTitles = ["Benar", "Salah"];
     const parentTitles = ["1", "2", "3", "4"];
@@ -46,15 +35,13 @@ export const seedOptions = async () => {
       else titles = schoolTitles;
 
       titles.forEach((title, i) => {
-        optionData.push({
-          question_id: q.id,
-          title,
-          score: getScore(q.id, q.is_negative, i),
-        });
+        optionData.push([q.id, title, getScore(q.id, !!q.is_negative, i)]);
       });
     }
 
-    await prisma.option.createMany({ data: optionData });
+    await pool.query("INSERT INTO options (question_id, title, score) VALUES ?", [
+      optionData,
+    ]);
     console.log("Options seeded successfully");
   } catch (error) {
     console.log(error);

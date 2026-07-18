@@ -1,40 +1,38 @@
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import pool from "../../src/config/db.js";
 
 export const seedQuesioners = async () => {
   try {
-    const existingQuesioners = await prisma.quesioner.findMany({
-      where: {
-        OR: [
-          { title: "Tingkat Pengetahuan Gizi Seimbang" },
-          { title: "Kebiasaan Sehari-hari Anak" },
-          { title: "Pelayanan Kesehatan Sekolah" },
-        ],
-      },
-    });
+    const titles = [
+      "Tingkat Pengetahuan Gizi Seimbang",
+      "Kebiasaan Sehari-hari Anak",
+      "Pelayanan Kesehatan Sekolah",
+    ];
+    const [existingQuesioners] = await pool.query(
+      "SELECT id FROM quesioners WHERE title IN (?)",
+      [titles],
+    );
 
     if (existingQuesioners.length > 0) {
       console.log("Quesioners already exist");
       return;
     }
 
-    await prisma.quesioner.createMany({
-      data: [
-        {
-          title: "Tingkat Pengetahuan Gizi Seimbang",
-          description: "Quisioner tentang pengetahuan gizi seimbang orang tua",
-        },
-        {
-          title: "Kebiasaan Sehari-hari Anak",
-          description: "Quisioner untuk mengetahui kebiasaaan sehari-hari anak",
-        },
-        {
-          title: "Pelayanan Kesehatan Sekolah",
-          description: "Quisioner Pelayanan kesehatan di sekolah",
-        },
+    await pool.query("INSERT INTO quesioners (title, description) VALUES ?", [
+      [
+        [
+          "Tingkat Pengetahuan Gizi Seimbang",
+          "Quisioner tentang pengetahuan gizi seimbang orang tua",
+        ],
+        [
+          "Kebiasaan Sehari-hari Anak",
+          "Quisioner untuk mengetahui kebiasaaan sehari-hari anak",
+        ],
+        [
+          "Pelayanan Kesehatan Sekolah",
+          "Quisioner Pelayanan kesehatan di sekolah",
+        ],
       ],
-    });
+    ]);
     console.log("Quesioner seeded successfully");
   } catch (error) {
     console.error(error);

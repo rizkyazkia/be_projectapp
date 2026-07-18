@@ -1,27 +1,21 @@
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import pool from "../../src/config/db.js";
 
 export const seedInstitutionTypes = async () => {
   try {
-
-    const existingInstitutionTypes = await prisma.institutionType.findMany({
-      where: {
-        OR: [
-          { name: "School" },
-          { name: "HealthCare" },
-        ],
-      },
-    })
+    const names = ["School", "HealthCare"];
+    const [existingInstitutionTypes] = await pool.query(
+      "SELECT id FROM institution_types WHERE name IN (?)",
+      [names],
+    );
 
     if (existingInstitutionTypes.length > 0) {
       console.log("Institution types already exist");
       return;
     }
 
-    await prisma.institutionType.createMany({
-      data: [{ name: "School" }, { name: "HealthCare" }],
-    });
+    await pool.query("INSERT INTO institution_types (name) VALUES ?", [
+      names.map((name) => [name]),
+    ]);
     console.log("Institution types seeded successfully");
   } catch (error) {
     console.error(error);
