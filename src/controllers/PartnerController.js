@@ -1,62 +1,65 @@
-import { PrismaClient } from "@prisma/client";
+import { randomUUID } from "node:crypto";
+import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
 
-const prisma = new PrismaClient();
-
 export const getPartners = async (req, res) => {
-  const page = parseInt(req.query.page) || 0;
-  const limit = parseInt(req.query.limit) || 10;
+  const page = Number.parseInt(req.query.page) || 0;
+  const limit = Number.parseInt(req.query.limit) || 10;
   const search = req.query.search || "";
   const offset = limit * page;
 
   try {
     const user = req.user;
-    const institution = await prisma.institution.findUnique({
-      where: { user_id: user.id },
-    });
+    const [institutionRows] = await pool.query(
+      "SELECT id FROM institutions WHERE user_id = ? LIMIT 1",
+      [user.id]
+    );
+    const institution = institutionRows[0];
 
     if (!institution) return errorResponse(res, null, "Institution not found");
 
-    const where = {
-      schoolId: institution.id,
-      ...(search
-        ? {
-            healthcare: {
-              OR: [
-                { name: { contains: search } },
-                { address: { contains: search } },
-                { phone: { contains: search } },
-              ],
-            },
-          }
-        : {}),
-    };
+    const searchClause = search
+      ? " AND (h.name LIKE ? OR h.address LIKE ? OR h.phone LIKE ?)"
+      : "";
+    const searchParams = search
+      ? [`%${search}%`, `%${search}%`, `%${search}%`]
+      : [];
 
-    const totalRows = await prisma.partnership.count({ where });
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM partnerships p JOIN institutions h ON h.id = p.healthcareId WHERE p.schoolId = ?${searchClause}`,
+      [institution.id, ...searchParams]
+    );
+    const totalRows = total;
     const totalPage = Math.ceil(totalRows / limit);
 
-    const partnerships = await prisma.partnership.findMany({
-      where,
-      include: {
-        healthcare: {
-          select: {
-            id: true,
-            name: true,
-            address: true,
-            phone: true,
-            email: true,
-          },
-        },
+    const [rows] = await pool.query(
+      `SELECT p.id AS p_id, p.schoolId AS p_schoolId, p.healthcareId AS p_healthcareId, p.createdAt AS p_createdAt,
+              h.id AS h_id, h.name AS h_name, h.address AS h_address, h.phone AS h_phone, h.email AS h_email
+       FROM partnerships p JOIN institutions h ON h.id = p.healthcareId
+       WHERE p.schoolId = ?${searchClause}
+       ORDER BY p.createdAt DESC
+       LIMIT ? OFFSET ?`,
+      [institution.id, ...searchParams, limit, offset]
+    );
+
+    const partnerships = rows.map((row) => ({
+      id: row.p_id,
+      schoolId: row.p_schoolId,
+      healthcareId: row.p_healthcareId,
+      createdAt: row.p_createdAt,
+      healthcare: {
+        id: row.h_id,
+        name: row.h_name,
+        address: row.h_address,
+        phone: row.h_phone,
+        email: row.h_email,
       },
-      skip: offset,
-      take: limit,
-      orderBy: { createdAt: "desc" },
-    });
+    }));
 
     return successResponse(
       res,
       { totalRows, totalPage, page, limit, partnerships },
-      "Partners retrieved successfully",
+      "Partners retrieved successfully"
     );
   } catch (error) {
     return errorResponse(res, error, "Failed to get partners");
@@ -72,22 +75,28 @@ export const addPartners = async (req, res) => {
       return errorResponse(
         res,
         null,
-        "healthcareIds must be a non-empty array",
+        "healthcareIds must be a non-empty array"
       );
     }
 
-    const institution = await prisma.institution.findUnique({
-      where: { user_id: user.id },
-    });
+    const [institutionRows] = await pool.query(
+      "SELECT id FROM institutions WHERE user_id = ? LIMIT 1",
+      [user.id]
+    );
+    const institution = institutionRows[0];
 
     if (!institution) return errorResponse(res, null, "Institution not found");
 
-    const data = healthcareIds.map((healthcareId) => ({
-      schoolId: institution.id,
+    const values = healthcareIds.map((healthcareId) => [
+      randomUUID(),
+      institution.id,
       healthcareId,
-    }));
+    ]);
 
-    await prisma.partnership.createMany({ data, skipDuplicates: true });
+    await pool.query(
+      "INSERT IGNORE INTO partnerships (id, schoolId, healthcareId) VALUES ?",
+      [values]
+    );
 
     return successResponse(res, null, "Partners added successfully");
   } catch (error) {
@@ -98,7 +107,15 @@ export const addPartners = async (req, res) => {
 export const deletePartner = async (req, res) => {
   try {
     const { id } = req.params;
-    await prisma.partnership.delete({ where: { id } });
+    const [result] = await pool.query(
+      "DELETE FROM partnerships WHERE id = ?",
+      [id]
+    );
+
+    if (result.affectedRows === 0) {
+      throw new Error("Partnership not found");
+    }
+
     return successResponse(res, null, "Partner removed successfully");
   } catch (error) {
     return errorResponse(res, error, "Failed to remove partner");
