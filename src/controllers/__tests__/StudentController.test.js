@@ -75,6 +75,13 @@ describe("getStudents", () => {
       expect.stringContaining("LEFT JOIN teachers t ON t.id = c.teacher_id"),
       ["%%", 10, 0]
     );
+    // getStudents' student relation is optional (no nested where-filter), unlike
+    // getStudentByUser's INNER JOIN below - this LEFT JOIN must not become an INNER JOIN.
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("LEFT JOIN students s ON s.familyMemberId = fm.id"),
+      ["%%", 10, 0]
+    );
 
     const [[body]] = res.json.mock.calls;
     const student = body.data.students[0];
@@ -279,6 +286,13 @@ describe("getStudentByUser", () => {
     expect(pool.query).toHaveBeenNthCalledWith(
       3,
       expect.stringContaining("LEFT JOIN classes c ON c.id = s.classId"),
+      ["%%", 7, 10, 0]
+    );
+    // The required relation itself (unlike getStudents' optional LEFT JOIN above)
+    // must be an INNER JOIN, since the original Prisma nested where-filter required it to exist.
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("INNER JOIN students s ON s.familyMemberId = fm.id"),
       ["%%", 7, 10, 0]
     );
   });
