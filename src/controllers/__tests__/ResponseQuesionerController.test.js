@@ -16,6 +16,7 @@ import {
   getResponseQuesionerInstitution,
   createResponseQuesionerInstitution,
   checkAnsweredQuesionerInstitution,
+  showResponseForParent,
 } from "../ResponseQuesionerController.js";
 
 function mockRes() {
@@ -910,6 +911,142 @@ describe("checkAnsweredQuesionerInstitution", () => {
     expect(res.json).toHaveBeenCalledWith({
       status: "error",
       message: "Failed to check answered status",
+      error: "Connection lost",
+    });
+  });
+});
+
+describe("showResponseForParent", () => {
+  it("returns all questions with paginated, boolean-coerced answers", async () => {
+    const req = {
+      params: { userId: "family-1", id: "5" },
+      query: {},
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([
+        [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
+        [],
+      ]) // family_members
+      .mockResolvedValueOnce([
+        [{ id: "resp-1", familyMemberId: "member-1", quisionerId: 5 }],
+        [],
+      ]) // responses, no join
+      .mockResolvedValueOnce([
+        [{ id: 10, quesioner_id: 5, title: "Q1", type: "SCALE" }],
+        [],
+      ]) // questions, unpaginated
+      .mockResolvedValueOnce([
+        [{ id: 100, question_id: 10, title: "Low", score: 0 }],
+        [],
+      ]) // options
+      .mockResolvedValueOnce([[{ count: 1 }], []]) // totalRows (answers count)
+      .mockResolvedValueOnce([
+        [
+          {
+            id: 1000,
+            questionId: 10,
+            responseId: "resp-1",
+            option_id: 100,
+            score: 0,
+            boolean_value: null,
+            scaleValue: 1,
+          },
+        ],
+        [],
+      ]); // answers, paginated
+
+    await showResponseForParent(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("FROM family_members WHERE familyId"),
+      ["family-1", "IBU", "AYAH"]
+    );
+
+    const payload = res.json.mock.calls[0][0];
+    expect(payload.data.answers[0].boolean_value).toBeNull();
+    expect(payload.data.questions[0].options).toEqual([
+      { id: 100, title: "Low", score: 0 },
+    ]);
+  });
+
+  it("returns 500 (404-as-error bug) when family member not found", async () => {
+    const req = { params: { userId: "family-1", id: "5" }, query: {} };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    await showResponseForParent(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 404, message: "Family member not found" })
+    );
+  });
+
+  it("returns the hardcoded empty shape (limit:10 preserved bug) when no response exists", async () => {
+    const req = {
+      params: { userId: "family-1", id: "5" },
+      query: { limit: "20" },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([
+        [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
+        [],
+      ])
+      .mockResolvedValueOnce([[], []]);
+
+    await showResponseForParent(req, res);
+
+    expect(res.json).toHaveBeenCalledWith({
+      totalRows: 0,
+      totalPage: 0,
+      page: 0,
+      limit: 10,
+      questions: [],
+      answers: [],
+    });
+  });
+
+  it("skips the options, count, and answers queries when no questions match", async () => {
+    const req = { params: { userId: "family-1", id: "5" }, query: {} };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([
+        [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
+        [],
+      ])
+      .mockResolvedValueOnce([
+        [{ id: "resp-1", familyMemberId: "member-1", quisionerId: 5 }],
+        [],
+      ])
+      .mockResolvedValueOnce([[], []]); // no questions
+
+    await showResponseForParent(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(3);
+    const payload = res.json.mock.calls[0][0];
+    expect(payload.data.totalRows).toBe(0);
+    expect(payload.data.answers).toEqual([]);
+  });
+
+  it("returns 500 via the catch block when pool.query rejects unexpectedly", async () => {
+    const req = { params: { userId: "family-1", id: "5" }, query: {} };
+    const res = mockRes();
+
+    pool.query.mockRejectedValueOnce(new Error("Connection lost"));
+
+    await showResponseForParent(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Failed to get response",
       error: "Connection lost",
     });
   });

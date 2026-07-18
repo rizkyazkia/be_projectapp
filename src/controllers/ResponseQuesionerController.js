@@ -585,33 +585,21 @@ export const showResponseForParent = async (req, res) => {
     const search = req.query.search || "";
     const offset = limit * page;
 
-    const familyMember = await prisma.familyMember.findFirst({
-      where: {
-        familyId: userId,
-        OR: [
-          {
-            relation: "IBU",
-          },
-          {
-            relation: "AYAH",
-          },
-        ],
-      },
-    });
+    const [familyMembers] = await pool.query(
+      "SELECT * FROM family_members WHERE familyId = ? AND (relation = ? OR relation = ?) LIMIT 1",
+      [userId, "IBU", "AYAH"]
+    );
+    const familyMember = familyMembers[0];
 
     if (!familyMember) {
       return errorResponse(res, 404, "Family member not found");
     }
 
-    const response = await prisma.response.findFirst({
-      where: {
-        familyMemberId: familyMember.id,
-        quisionerId: id,
-      },
-      include: {
-        answers: true,
-      },
-    });
+    const [responses] = await pool.query(
+      "SELECT * FROM responses WHERE familyMemberId = ? AND quisionerId = ? LIMIT 1",
+      [familyMember.id, id]
+    );
+    const response = responses[0];
 
     if (!response) {
       return res.json({
@@ -624,64 +612,55 @@ export const showResponseForParent = async (req, res) => {
       });
     }
 
-    const questions = await prisma.question.findMany({
-      where: {
-        quesioner_id: id,
-        title: {
-          contains: search,
-        },
-      },
-      select: {
-        id: true,
-        quesioner_id: true,
-        title: true,
-        type: true,
-        options: {
-          select: {
-            id: true,
-            title: true,
-            score: true,
-          },
-        },
-      },
-    });
+    const [questionRows] = await pool.query(
+      "SELECT id, quesioner_id, title, type FROM questions WHERE quesioner_id = ? AND title LIKE ?",
+      [id, `%${search}%`]
+    );
 
-    const questionIds = questions.map((q) => q.id);
+    const questionIds = questionRows.map((q) => q.id);
 
-    const totalRows = await prisma.answer.count({
-      where: {
-        responseId: response.id,
-        questionId: {
-          in: questionIds,
-        },
-      },
-    });
+    let optionRows = [];
+    if (questionIds.length > 0) {
+      const [rows] = await pool.query(
+        "SELECT id, question_id, title, score FROM options WHERE question_id IN (?)",
+        [questionIds]
+      );
+      optionRows = rows;
+    }
+
+    const questions = questionRows.map((q) => ({
+      ...q,
+      options: optionRows
+        .filter((o) => o.question_id === q.id)
+        .map((o) => ({ id: o.id, title: o.title, score: o.score })),
+    }));
+
+    let totalRows = 0;
+    let answerRows = [];
+    if (questionIds.length > 0) {
+      const [totalRowsResult] = await pool.query(
+        "SELECT COUNT(*) AS count FROM answers WHERE responseId = ? AND questionId IN (?)",
+        [response.id, questionIds]
+      );
+      totalRows = totalRowsResult[0].count;
+
+      const [rows] = await pool.query(
+        "SELECT * FROM answers WHERE responseId = ? AND questionId IN (?) ORDER BY id ASC LIMIT ? OFFSET ?",
+        [response.id, questionIds, limit, offset]
+      );
+      answerRows = rows;
+    }
 
     const totalPage = Math.ceil(totalRows / limit);
-    const answers = await prisma.answer.findMany({
-      where: {
-        responseId: response.id,
-        questionId: {
-          in: questionIds,
-        },
-      },
-      skip: offset,
-      take: limit,
-      orderBy: {
-        id: "asc",
-      },
-    });
+
+    const answers = answerRows.map((a) => ({
+      ...a,
+      boolean_value: a.boolean_value === null ? null : !!a.boolean_value,
+    }));
 
     return successResponse(
       res,
-      {
-        totalRows,
-        totalPage,
-        page,
-        limit,
-        questions,
-        answers,
-      },
+      { totalRows, totalPage, page, limit, questions, answers },
       "Berhasil mendapatkan data"
     );
   } catch (error) {
