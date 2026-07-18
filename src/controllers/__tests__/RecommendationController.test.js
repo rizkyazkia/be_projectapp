@@ -21,6 +21,8 @@ import {
   getSingleRecommendation,
   getInterventionsBelongToInstitution,
   getInterventionsBelongToFamily,
+  getInterventionById,
+  deleteIntervention,
 } from "../RecommendationController.js";
 
 function mockRes() {
@@ -940,6 +942,107 @@ describe("getInterventionsBelongToFamily", () => {
     pool.query.mockRejectedValueOnce(dbError);
 
     await getInterventionsBelongToFamily(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("error");
+    expect(data.message).toBe("Failed to get response");
+    expect(data.error).toBe("connection lost");
+  });
+});
+
+describe("getInterventionById", () => {
+  it("returns the intervention with options explicitly JSON.parse'd", async () => {
+    const req = { params: { id: "iv-1" } };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([
+      [{ id: "iv-1", forType: "PARENT", options: JSON.stringify({ x: 1 }), notes: null }],
+      [],
+    ]);
+
+    await getInterventionById(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("SELECT * FROM interventions WHERE id = ?"),
+      ["iv-1"],
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+    const [data] = res.json.mock.calls[0];
+    expect(data.data.options).toEqual({ x: 1 });
+  });
+
+  it("errors (real HTTP 500) when the intervention id does not exist", async () => {
+    const req = { params: { id: "missing" } };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    await getInterventionById(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.message).toBe("Failed to get response");
+  });
+
+  it("returns a 500 error response when a query rejects (genuine catch-block path)", async () => {
+    const req = { params: { id: "iv-1" } };
+    const res = mockRes();
+
+    const dbError = new Error("connection lost");
+    pool.query.mockRejectedValueOnce(dbError);
+
+    await getInterventionById(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("error");
+    expect(data.message).toBe("Failed to get response");
+    expect(data.error).toBe("connection lost");
+  });
+});
+
+describe("deleteIntervention", () => {
+  it("fetches then deletes, returning the pre-delete row WITHOUT parsing options", async () => {
+    const req = { params: { id: "iv-1" } };
+    const res = mockRes();
+    const rawOptions = JSON.stringify({ x: 1 });
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "iv-1", forType: "PARENT", options: rawOptions }], []]) // fetch
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // delete
+
+    await deleteIntervention(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(2, expect.stringContaining("DELETE FROM interventions WHERE id = ?"), ["iv-1"]);
+    expect(res.status).toHaveBeenCalledWith(200);
+    const [data] = res.json.mock.calls[0];
+    expect(data.data.options).toBe(rawOptions); // NOT JSON.parse'd, unlike getInterventionById
+  });
+
+  it("errors (real HTTP 500) when the intervention id does not exist", async () => {
+    const req = { params: { id: "missing" } };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    await deleteIntervention(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1); // no DELETE attempted
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+
+  it("returns a 500 error response when a query rejects (genuine catch-block path)", async () => {
+    const req = { params: { id: "iv-1" } };
+    const res = mockRes();
+
+    const dbError = new Error("connection lost");
+    pool.query.mockRejectedValueOnce(dbError);
+
+    await deleteIntervention(req, res);
 
     expect(pool.query).toHaveBeenCalledTimes(1);
     expect(res.status).toHaveBeenCalledWith(500);

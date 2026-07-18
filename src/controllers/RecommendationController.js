@@ -1,10 +1,7 @@
-import { PrismaClient } from "@prisma/client";
 import pool from "../config/db.js";
 import { randomUUID } from "node:crypto";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
 import { createNotification } from "./NotificationController.js";
-
-const prisma = new PrismaClient();
 
 export const getRecomendations = async (req, res) => {
   const page = parseInt(req.query.page) || 0;
@@ -954,11 +951,11 @@ export const getInterventionById = async (req, res) => {
     if (!id) {
       throw new Error("Id is required");
     }
-    const intervention = await prisma.intervention.findUnique({
-      where: {
-        id,
-      },
-    });
+    const [rows] = await pool.query(
+      "SELECT * FROM interventions WHERE id = ? LIMIT 1",
+      [id],
+    );
+    const intervention = rows[0];
     if (!intervention) {
       throw new Error(`Intervention with id ${id} is not found`);
     }
@@ -981,19 +978,15 @@ export const deleteIntervention = async (req, res) => {
     if (!id) {
       throw new Error("Id is required");
     }
-    const intervention = await prisma.intervention.findUnique({
-      where: {
-        id,
-      },
-    });
+    const [rows] = await pool.query(
+      "SELECT * FROM interventions WHERE id = ? LIMIT 1",
+      [id],
+    );
+    const intervention = rows[0];
     if (!intervention) {
       throw new Error(`Intervention with id ${id} is not found`);
     }
-    await prisma.intervention.delete({
-      where: {
-        id,
-      },
-    });
+    await pool.query("DELETE FROM interventions WHERE id = ?", [id]);
     res.status(200).json({
       status: "Success",
       message: "Intervention deleted",
