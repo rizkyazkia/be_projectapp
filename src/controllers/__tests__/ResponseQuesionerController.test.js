@@ -13,6 +13,7 @@ import {
   createResponseQuesioner,
   checkAnsweredQuesioner,
   updateResponseQuesioner,
+  getResponseQuesionerInstitution,
 } from "../ResponseQuesionerController.js";
 
 function mockRes() {
@@ -598,5 +599,141 @@ describe("updateResponseQuesioner", () => {
       expect.stringContaining("UPDATE answers SET"),
       [100, null, 1, 2, 1000]
     );
+  });
+});
+
+describe("getResponseQuesionerInstitution", () => {
+  it("returns all questions with paginated, boolean-coerced answers", async () => {
+    const req = {
+      user: { id: "user-1" },
+      params: { id: "5" },
+      query: {},
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, user_id: "user-1" }], []]) // institutions
+      .mockResolvedValueOnce([
+        [{ id: "resp-1", institutionId: 1, quisionerId: 5 }],
+        [],
+      ]) // responses
+      .mockResolvedValueOnce([
+        [{ id: 10, quesioner_id: 5, title: "Q1", type: "BOOLEAN" }],
+        [],
+      ]) // questions, unpaginated
+      .mockResolvedValueOnce([
+        [{ id: 100, question_id: 10, title: "Yes", score: 1 }],
+        [],
+      ]) // options
+      .mockResolvedValueOnce([[{ count: 1 }], []]) // totalRows (answers count)
+      .mockResolvedValueOnce([
+        [
+          {
+            id: 1000,
+            questionId: 10,
+            responseId: "resp-1",
+            option_id: 100,
+            score: 1,
+            boolean_value: 0,
+            scaleValue: null,
+          },
+        ],
+        [],
+      ]); // answers, paginated
+
+    await getResponseQuesionerInstitution(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("FROM institutions WHERE user_id"),
+      ["user-1"]
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.not.stringContaining("LIMIT"),
+      [5, "%%"]
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      6,
+      expect.stringContaining("LIMIT ? OFFSET ?"),
+      ["resp-1", [10], 10, 0]
+    );
+
+    const payload = res.json.mock.calls[0][0];
+    expect(payload.data.answers[0].boolean_value).toBe(false);
+  });
+
+  it("returns 500 (404-as-error bug) when institution not found", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" }, query: {} };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    await getResponseQuesionerInstitution(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 404, message: "Institution not found" })
+    );
+  });
+
+  it("returns the hardcoded empty shape (limit:10 preserved bug) when no response exists", async () => {
+    const req = {
+      user: { id: "user-1" },
+      params: { id: "5" },
+      query: { limit: "5" },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([[], []]);
+
+    await getResponseQuesionerInstitution(req, res);
+
+    expect(res.json).toHaveBeenCalledWith({
+      totalRows: 0,
+      totalPage: 0,
+      page: 0,
+      limit: 10,
+      questions: [],
+      answers: [],
+    });
+  });
+
+  it("skips the options, count, and paginated-answers queries when no questions match", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" }, query: {} };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([
+        [{ id: "resp-1", institutionId: 1, quisionerId: 5 }],
+        [],
+      ])
+      .mockResolvedValueOnce([[], []]); // no questions
+
+    await getResponseQuesionerInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(3);
+    const payload = res.json.mock.calls[0][0];
+    expect(payload.data.totalRows).toBe(0);
+    expect(payload.data.answers).toEqual([]);
+  });
+
+  it("returns 500 via the catch block when pool.query rejects unexpectedly", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" }, query: {} };
+    const res = mockRes();
+
+    pool.query.mockRejectedValueOnce(new Error("Connection lost"));
+
+    await getResponseQuesionerInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Failed to get response",
+      error: "Connection lost",
+    });
   });
 });
