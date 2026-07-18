@@ -1,62 +1,52 @@
-import { PrismaClient } from "@prisma/client";
+import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
 
-const prisma = new PrismaClient();
-
 const getUserInstitution = async (userId) => {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: {
-      institution: {
-        select: {
-          id: true,
-        }
-      }
-    }
-  });
-  if (!user?.institution) throw new Error("User tidak terdaftar di institusi manapun");
-  return user.institution.id;
+  const [rows] = await pool.query(
+    `SELECT i.id AS institution_id
+     FROM users u
+     LEFT JOIN institutions i ON i.user_id = u.id
+     WHERE u.id = ?
+     LIMIT 1`,
+    [userId]
+  );
+  const row = rows[0];
+  if (!row || row.institution_id == null) {
+    throw new Error("User tidak terdaftar di institusi manapun");
+  }
+  return row.institution_id;
 };
 
 export const getClasses = async (req, res) => {
-  const page = parseInt(req.query.page) || 0;
-  const limit = parseInt(req.query.limit) || 10;
+  const page = Number.parseInt(req.query.page) || 0;
+  const limit = Number.parseInt(req.query.limit) || 10;
   const search = req.query.search || "";
   const offset = limit * page;
 
   try {
-    const totalRows = await prisma.class.count({
-      where: {
-        name: {
-          contains: search,
-        },
-      },
-    });
+    const likeParam = `%${search}%`;
+    const [[countRows], [classRows]] = await Promise.all([
+      pool.query(`SELECT COUNT(*) AS total FROM classes WHERE name LIKE ?`, [likeParam]),
+      pool.query(
+        `SELECT c.id, c.name, c.school_id, t.id AS teacher_id, t.fullName AS teacher_fullName
+         FROM classes c
+         LEFT JOIN teachers t ON t.id = c.teacher_id
+         WHERE c.name LIKE ?
+         ORDER BY c.id ASC
+         LIMIT ? OFFSET ?`,
+        [likeParam, limit, offset]
+      ),
+    ]);
 
+    const totalRows = countRows[0].total;
     const totalPage = Math.ceil(totalRows / limit);
-    const classes = await prisma.class.findMany({
-      where: {
-        name: {
-          contains: search,
-        },
-      },
-      select: {
-        id: true,
-        name: true,
-        school_id: true,
-        teacher: {
-          select: {
-            id: true,
-            fullName: true,
-          },
-        },
-      },
-      skip: offset,
-      take: limit,
-      orderBy: {
-        id: "asc",
-      },
-    });
+    const classes = classRows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      school_id: row.school_id,
+      teacher: row.teacher_id ? { id: row.teacher_id, fullName: row.teacher_fullName } : null,
+    }));
+
     return successResponse(
       res,
       { totalRows, totalPage, page, limit, classes },
@@ -76,37 +66,39 @@ export const createClasses = async (req, res) => {
     if (Array.isArray(classes)) {
       const createdClasses = [];
       for (const cls of classes) {
-        const existingClass = await prisma.class.findUnique({
-          where: { name: cls.name, school_id },
-        });
+        const [existingRows] = await pool.query(
+          `SELECT * FROM classes WHERE name = ? AND school_id = ? LIMIT 1`,
+          [cls.name, school_id]
+        );
 
-        if (!existingClass) {
-          const newClass = await prisma.class.create({
-            data: { name: cls.name, school_id },
-          });
-          createdClasses.push(newClass);
+        if (!existingRows[0]) {
+          const [insertResult] = await pool.query(`INSERT INTO classes (name, school_id) VALUES (?, ?)`, [
+            cls.name,
+            school_id,
+          ]);
+          const [newRows] = await pool.query(`SELECT * FROM classes WHERE id = ? LIMIT 1`, [insertResult.insertId]);
+          createdClasses.push(newRows[0]);
         }
       }
 
       return successResponse(res, createdClasses, "Berhasil membuat kelas");
     } else {
-      const existingClass = await prisma.class.findUnique({
-        where: { name: classes.name, school_id },
-      });
+      const [existingRows] = await pool.query(
+        `SELECT * FROM classes WHERE name = ? AND school_id = ? LIMIT 1`,
+        [classes.name, school_id]
+      );
 
-      if (existingClass) {
-        return errorResponse(
-          res,
-          "Kelas sudah tersedia",
-          "Tidak dapat membuat kelas yang sudah ada"
-        );
+      if (existingRows[0]) {
+        return errorResponse(res, "Kelas sudah tersedia", "Tidak dapat membuat kelas yang sudah ada");
       }
 
-      const newClass = await prisma.class.create({
-        data: { name: classes.name, school_id },
-      });
+      const [insertResult] = await pool.query(`INSERT INTO classes (name, school_id) VALUES (?, ?)`, [
+        classes.name,
+        school_id,
+      ]);
+      const [newRows] = await pool.query(`SELECT * FROM classes WHERE id = ? LIMIT 1`, [insertResult.insertId]);
 
-      return successResponse(res, newClass, "Berhasil membuat kelas");
+      return successResponse(res, newRows[0], "Berhasil membuat kelas");
     }
   } catch (error) {
     return errorResponse(res, error, "Internal server error");
@@ -118,34 +110,19 @@ export const updateClasses = async (req, res) => {
   const { name } = req.body;
 
   try {
-    const existingClass = await prisma.class.findUnique({
-      where: {
-        id: parseInt(id),
-      },
-    });
+    const [existingRows] = await pool.query(`SELECT * FROM classes WHERE id = ? LIMIT 1`, [Number.parseInt(id)]);
+    const existingClass = existingRows[0];
 
     if (!existingClass) {
       return errorResponse(res, 404, "Kelas tidak ditemukan");
     }
 
-    const updatedClass = await prisma.class.update({
-      where: {
-        id: parseInt(id),
-      },
-      data: {
-        name,
-      },
-    });
+    await pool.query(`UPDATE classes SET name = ? WHERE id = ?`, [name, Number.parseInt(id)]);
+    const [updatedRows] = await pool.query(`SELECT * FROM classes WHERE id = ? LIMIT 1`, [Number.parseInt(id)]);
+    const updatedClass = updatedRows[0];
 
     if (existingClass.teacher_id) {
-      await prisma.teacher.update({
-        where: {
-          id: existingClass.teacher_id,
-        },
-        data: {
-          role: name,
-        },
-      });
+      await pool.query(`UPDATE teachers SET role = ? WHERE id = ?`, [name, existingClass.teacher_id]);
     }
 
     return successResponse(res, updatedClass, "Kelas berhasil diperbarui");
@@ -160,11 +137,8 @@ export const deleteClasses = async (req, res) => {
   try {
     const school_id = await getUserInstitution(req.user.id);
 
-    const existingClass = await prisma.class.findFirst({
-      where: {
-        id: parseInt(id),
-      },
-    });
+    const [existingRows] = await pool.query(`SELECT * FROM classes WHERE id = ? LIMIT 1`, [Number.parseInt(id)]);
+    const existingClass = existingRows[0];
 
     if (!existingClass) {
       return errorResponse(res, 404, "Kelas tidak ditemukan");
@@ -175,21 +149,11 @@ export const deleteClasses = async (req, res) => {
     }
 
     if (existingClass.teacher_id) {
-      await prisma.teacher.update({
-        where: {
-          id: existingClass.teacher_id,
-        },
-        data: {
-          role: null,
-        },
-      });
+      await pool.query(`UPDATE teachers SET role = ? WHERE id = ?`, [null, existingClass.teacher_id]);
     }
 
-    await prisma.class.delete({
-      where: {
-        id: parseInt(id),
-      },
-    });
+    await pool.query(`DELETE FROM classes WHERE id = ?`, [Number.parseInt(id)]);
+
     return successResponse(res, null, "Kelas berhasil dihapus");
   } catch (error) {
     return errorResponse(res, error, "Error saat menghapus teacher");
@@ -200,20 +164,11 @@ export const getClassesByInstitution = async (req, res) => {
   const { institutionId } = req.params;
 
   try {
-    const classes = await prisma.class.findMany({
-      where: {
-          school_id: Number(institutionId),
-       },
-      select: {
-        id: true,
-        name: true,
-      },
-      orderBy: {
-        id: "asc",
-      }
-    });
+    const [classes] = await pool.query(`SELECT id, name FROM classes WHERE school_id = ? ORDER BY id ASC`, [
+      Number(institutionId),
+    ]);
     return successResponse(res, classes, "Kelas berhasil diambil berdasarkan institusi");
   } catch (error) {
     return errorResponse(res, error, "Error saat mengambil kelas berdasarkan institusi");
   }
-}
+};
