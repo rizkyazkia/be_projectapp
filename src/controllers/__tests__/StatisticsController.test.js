@@ -599,4 +599,21 @@ describe("getParentDashboardSummary", () => {
       category: "Dasar",
     });
   });
+
+  it("returns the errorResponse shape when a pool.query call genuinely rejects (not the family-not-found early return)", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fam-1", userId: "user-1" }], []]) // families — found, so we pass the early-return guard
+      .mockRejectedValueOnce(new Error("connection refused")); // members query — actually throws
+    const res = mockRes();
+
+    await getParentDashboardSummary(mockReq(), res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "error",
+        message: "Failed to get dashboard summary",
+      }),
+    );
+  });
 });
