@@ -258,6 +258,27 @@ describe("createResponseQuesioner", () => {
     );
   });
 
+  it("returns 500 via the catch block when pool.query rejects unexpectedly", async () => {
+    const req = {
+      user: { id: "user-1" },
+      params: { id: "5" },
+      body: { answers: [] },
+    };
+    const res = mockRes();
+
+    pool.query.mockRejectedValueOnce(new Error("Connection lost"));
+
+    await createResponseQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Gagal menjawab kuisioner, silahkan diulang",
+      error: "Connection lost",
+    });
+  });
+
   it("returns 500 (401-as-error bug) when there is no user on the request", async () => {
     const req = { user: null, params: { id: "5" }, body: { answers: [] } };
     const res = mockRes();
