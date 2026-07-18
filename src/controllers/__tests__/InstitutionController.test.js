@@ -104,6 +104,82 @@ describe("getInstitutions", () => {
       },
     });
   });
+
+  it("accepts custom page, limit, and search parameters", async () => {
+    const req = { query: { page: "2", limit: "5", search: "Bandung" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ count: 12 }], []])
+      .mockResolvedValueOnce([
+        [
+          {
+            id: 8,
+            name: "RS Bandung",
+            email: "rs@bandung.com",
+            phone: "0802",
+            address: "Jl. Bandung",
+            province_name: "Jawa Barat",
+            city_name: "Bandung",
+            institution_type_name: "HealthCare",
+          },
+        ],
+        [],
+      ]);
+
+    await getInstitutions(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("SELECT COUNT(DISTINCT i.id) AS count"),
+      ["%Bandung%", "%Bandung%", "%Bandung%", "%Bandung%"]
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining(
+        "LEFT JOIN institution_types it ON i.type = it.id"
+      ),
+      ["%Bandung%", "%Bandung%", "%Bandung%", "%Bandung%", 5, 10]
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "success",
+      message: "Institutions retrieved successfully",
+      data: {
+        totalRows: 12,
+        totalPage: 3,
+        page: 2,
+        limit: 5,
+        institutions: [
+          {
+            id: 8,
+            name: "RS Bandung",
+            email: "rs@bandung.com",
+            phone: "0802",
+            address: "Jl. Bandung",
+            province: { name: "Jawa Barat" },
+            city: { name: "Bandung" },
+            institution_type: { name: "HealthCare" },
+          },
+        ],
+      },
+    });
+  });
+
+  it("returns a 500 error when the count query fails", async () => {
+    const req = { query: {} };
+    const res = mockRes();
+    pool.query.mockRejectedValueOnce(new Error("connection lost"));
+
+    await getInstitutions(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Internal server error",
+      error: "connection lost",
+    });
+  });
 });
 
 describe("getInstitutionByUser", () => {
@@ -141,6 +217,21 @@ describe("getInstitutionByUser", () => {
       status: "error",
       message: "Institution not found",
       error: 404,
+    });
+  });
+
+  it("returns a 500 error when the query fails", async () => {
+    const req = { user: { id: "user-1" } };
+    const res = mockRes();
+    pool.query.mockRejectedValueOnce(new Error("database error"));
+
+    await getInstitutionByUser(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Internal server error",
+      error: "database error",
     });
   });
 });
@@ -185,6 +276,21 @@ describe("getInstitutionType", () => {
       status: "error",
       message: "No institution types found",
       error: 404,
+    });
+  });
+
+  it("returns a 500 error when the query fails", async () => {
+    const req = {};
+    const res = mockRes();
+    pool.query.mockRejectedValueOnce(new Error("connection timeout"));
+
+    await getInstitutionType(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Internal server error",
+      error: "connection timeout",
     });
   });
 });
@@ -249,5 +355,20 @@ describe("getHealthCares", () => {
       ),
       ["%bandung%", "%bandung%", "%bandung%"]
     );
+  });
+
+  it("returns a 500 error when the query fails", async () => {
+    const req = { query: {} };
+    const res = mockRes();
+    pool.query.mockRejectedValueOnce(new Error("query syntax error"));
+
+    await getHealthCares(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Internal server error",
+      error: "query syntax error",
+    });
   });
 });

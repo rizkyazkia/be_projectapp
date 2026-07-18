@@ -139,4 +139,19 @@ describe("refreshToken", () => {
       error: "jwt expired",
     });
   });
+
+  it("returns a 500 error when the database query fails", async () => {
+    const req = { cookies: { refreshToken: "valid-refresh-token" } };
+    const res = mockRes();
+    pool.query.mockRejectedValueOnce(new Error("database unavailable"));
+
+    await refreshToken(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Error refreshing token",
+      error: "database unavailable",
+    });
+  });
 });

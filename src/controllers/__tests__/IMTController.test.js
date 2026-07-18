@@ -95,4 +95,21 @@ describe("calculateIMT", () => {
       })
     );
   });
+
+  it("returns a 500 error when the query fails", async () => {
+    const req = {
+      body: { gender: "L", ageMonths: 24, weightKg: 12, heightCm: 90 },
+    };
+    const res = mockRes();
+    pool.query.mockRejectedValueOnce(new Error("database connection lost"));
+
+    await calculateIMT(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Gagal menghitung IMT",
+      error: "database connection lost",
+    });
+  });
 });
