@@ -1,4 +1,6 @@
 import { PrismaClient } from "@prisma/client";
+import pool from "../config/db.js";
+import { randomUUID } from "node:crypto";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
 import { createNotification } from "./NotificationController.js";
 
@@ -10,104 +12,141 @@ export const getRecomendations = async (req, res) => {
   const offset = limit * page;
 
   try {
-    let whereClause = {};
-    if (req.user?.role === "healthcare") {
-      const institution = await prisma.institution.findFirst({
-        where: { user_id: req.user.id },
-      });
-      if (institution) {
-        whereClause.healthcareInstitutionId = institution.id;
-      }
-    } else if (req.user?.role === "school") {
-      const institution = await prisma.institution.findFirst({
-        where: { user_id: req.user.id },
-      });
-      if (institution) {
-        whereClause.submittedBy = {
-          institution: { id: institution.id },
-        };
-      }
+    let institution = null;
+    if (req.user?.role === "healthcare" || req.user?.role === "school") {
+      const [instRows] = await pool.query(
+        "SELECT id FROM institutions WHERE user_id = ? LIMIT 1",
+        [req.user.id],
+      );
+      institution = instRows[0] || null;
     }
 
-    const totalRows = await prisma.recommendation.count({
-      where: whereClause,
-    });
+    const joinSql = `
+      LEFT JOIN users su ON su.id = r.submittedById
+      LEFT JOIN institutions si ON si.user_id = su.id
+      LEFT JOIN cities sic ON sic.id = si.city_id
+      LEFT JOIN provinces sip ON sip.id = si.province_id
+      LEFT JOIN students st ON st.id = r.studentId
+      LEFT JOIN institutions sti ON sti.id = st.schoolId
+      LEFT JOIN cities stic ON stic.id = sti.city_id
+      LEFT JOIN provinces stip ON stip.id = sti.province_id
+      LEFT JOIN classes cl ON cl.id = st.classId
+      LEFT JOIN family_members fm ON fm.id = st.familyMemberId
+      LEFT JOIN socio_economic se ON se.id = fm.socioEconomicId
+    `;
 
-    const recomend = await prisma.recommendation.findMany({
-      where: whereClause,
-      select: {
-        id: true,
-        status: true,
-        createdAt: true,
-        submittedBy: {
-          select: {
-            id: true,
-            institution: {
-              select: {
-                id: true,
-                name: true,
-                address: true,
-                phone: true,
-                email: true,
-                city: {
-                  select: { id: true, name: true },
-                },
-                province: {
-                  select: { id: true, name: true },
-                },
-              },
-            },
-          },
-        },
-        student: {
-          select: {
-            id: true,
-            nis: true,
-            schoolYear: true,
-            semester: true,
-            institution: {
-              select: {
-                id: true,
-                name: true,
-                address: true,
-                phone: true,
-                email: true,
-                city: { select: { id: true, name: true } },
-                province: { select: { id: true, name: true } },
-              },
-            },
-            class: {
-              select: { id: true, name: true },
-            },
-            familyMember: {
-              select: {
-                id: true,
-                fullName: true,
-                birthDate: true,
-                gender: true,
-                familyId: true,
-                SocioEconomic: {
-                  select: { address: true },
-                },
-                nutrition: {
-                  select: {
-                    id: true,
-                    nutritionStatus: {
-                      select: { id: true, information: true },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      skip: offset,
-      take: limit,
-      orderBy: {
-        createdAt: "asc",
-      },
-    });
+    let filterSql = "";
+    let filterParams = [];
+    if (req.user?.role === "healthcare" && institution) {
+      filterSql = "WHERE r.healthcareInstitutionId = ?";
+      filterParams = [institution.id];
+    } else if (req.user?.role === "school" && institution) {
+      filterSql = "WHERE si.id = ?";
+      filterParams = [institution.id];
+    }
+
+    const [countRows] = await pool.query(
+      `SELECT COUNT(*) AS count FROM recommendations r ${joinSql} ${filterSql}`,
+      filterParams,
+    );
+    const totalRows = countRows[0].count;
+
+    const [rows] = await pool.query(
+      `SELECT
+        r.id, r.status, r.createdAt,
+        su.id AS submittedBy_id,
+        si.id AS si_id, si.name AS si_name, si.address AS si_address, si.phone AS si_phone, si.email AS si_email,
+        sic.id AS sic_id, sic.name AS sic_name,
+        sip.id AS sip_id, sip.name AS sip_name,
+        st.id AS student_id, st.nis AS student_nis, st.schoolYear AS student_schoolYear, st.semester AS student_semester,
+        sti.id AS sti_id, sti.name AS sti_name, sti.address AS sti_address, sti.phone AS sti_phone, sti.email AS sti_email,
+        stic.id AS stic_id, stic.name AS stic_name,
+        stip.id AS stip_id, stip.name AS stip_name,
+        cl.id AS class_id, cl.name AS class_name,
+        fm.id AS fm_id, fm.fullName AS fm_fullName, fm.birthDate AS fm_birthDate, fm.gender AS fm_gender, fm.familyId AS fm_familyId,
+        se.id AS se_id, se.address AS se_address
+      FROM recommendations r
+      ${joinSql}
+      ${filterSql}
+      ORDER BY r.createdAt ASC
+      LIMIT ? OFFSET ?`,
+      [...filterParams, limit, offset],
+    );
+
+    const familyMemberIds = [...new Set(rows.filter((row) => row.fm_id).map((row) => row.fm_id))];
+    let nutritionRows = [];
+    if (familyMemberIds.length > 0) {
+      const [nRows] = await pool.query(
+        `SELECT n.id, n.familyMemberId, ns.id AS ns_id, ns.information AS ns_information
+         FROM nutritions n
+         LEFT JOIN nutrition_status ns ON ns.id = n.nutritionStatusId
+         WHERE n.familyMemberId IN (?)`,
+        [familyMemberIds],
+      );
+      nutritionRows = nRows;
+    }
+    const nutritionByFamilyMember = new Map();
+    for (const n of nutritionRows) {
+      const list = nutritionByFamilyMember.get(n.familyMemberId) || [];
+      list.push({
+        id: n.id,
+        nutritionStatus: n.ns_id ? { id: n.ns_id, information: n.ns_information } : null,
+      });
+      nutritionByFamilyMember.set(n.familyMemberId, list);
+    }
+
+    const recomend = rows.map((row) => ({
+      id: row.id,
+      status: row.status,
+      createdAt: row.createdAt,
+      submittedBy: row.submittedBy_id
+        ? {
+            id: row.submittedBy_id,
+            institution: row.si_id
+              ? {
+                  id: row.si_id,
+                  name: row.si_name,
+                  address: row.si_address,
+                  phone: row.si_phone,
+                  email: row.si_email,
+                  city: row.sic_id ? { id: row.sic_id, name: row.sic_name } : null,
+                  province: row.sip_id ? { id: row.sip_id, name: row.sip_name } : null,
+                }
+              : null,
+          }
+        : null,
+      student: row.student_id
+        ? {
+            id: row.student_id,
+            nis: row.student_nis,
+            schoolYear: row.student_schoolYear,
+            semester: row.student_semester,
+            institution: row.sti_id
+              ? {
+                  id: row.sti_id,
+                  name: row.sti_name,
+                  address: row.sti_address,
+                  phone: row.sti_phone,
+                  email: row.sti_email,
+                  city: row.stic_id ? { id: row.stic_id, name: row.stic_name } : null,
+                  province: row.stip_id ? { id: row.stip_id, name: row.stip_name } : null,
+                }
+              : null,
+            class: row.class_id ? { id: row.class_id, name: row.class_name } : null,
+            familyMember: row.fm_id
+              ? {
+                  id: row.fm_id,
+                  fullName: row.fm_fullName,
+                  birthDate: row.fm_birthDate,
+                  gender: row.fm_gender,
+                  familyId: row.fm_familyId,
+                  SocioEconomic: row.se_id ? { address: row.se_address } : null,
+                  nutrition: nutritionByFamilyMember.get(row.fm_id) || [],
+                }
+              : null,
+          }
+        : null,
+    }));
 
     const totalPage = Math.ceil(totalRows / limit);
 
