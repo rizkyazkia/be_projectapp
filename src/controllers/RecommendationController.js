@@ -519,6 +519,7 @@ export const getResponseInstitution = async (req, res) => {
 
 export const createIntervention = async (req, res) => {
   let connection;
+  let committed = false;
   try {
     const user = req.user;
     if (user.role !== "healthcare") {
@@ -553,44 +554,52 @@ export const createIntervention = async (req, res) => {
     );
 
     await connection.commit();
+    committed = true;
 
     const intervention = { count: insertResult.affectedRows };
 
-    // Notifikasi ke parent (plain, non-transactional lookups after commit)
-    const [recRows] = await pool.query(
-      `SELECT r.id, fm.id AS fm_id, fm.fullName AS fm_fullName, u.id AS parent_user_id
-       FROM recommendations r
-       LEFT JOIN students st ON st.id = r.studentId
-       LEFT JOIN family_members fm ON fm.id = st.familyMemberId
-       LEFT JOIN families f ON f.id = fm.familyId
-       LEFT JOIN users u ON u.id = f.userId
-       WHERE r.id = ? LIMIT 1`,
-      [id],
-    );
-    const recWithParent = recRows[0];
-
-    if (recWithParent?.parent_user_id) {
-      const [puskesmasRows] = await pool.query(
-        `SELECT i.name AS institution_name
-         FROM users u
-         LEFT JOIN institutions i ON i.user_id = u.id
-         WHERE u.id = ? LIMIT 1`,
-        [user.id],
+    // Notifikasi ke parent (plain, non-transactional lookups after commit).
+    // The intervention itself already committed successfully at this point,
+    // so a failure here must not roll back (there's nothing left to roll
+    // back) or surface as an error response - it's logged and swallowed.
+    try {
+      const [recRows] = await pool.query(
+        `SELECT r.id, fm.id AS fm_id, fm.fullName AS fm_fullName, u.id AS parent_user_id
+         FROM recommendations r
+         LEFT JOIN students st ON st.id = r.studentId
+         LEFT JOIN family_members fm ON fm.id = st.familyMemberId
+         LEFT JOIN families f ON f.id = fm.familyId
+         LEFT JOIN users u ON u.id = f.userId
+         WHERE r.id = ? LIMIT 1`,
+        [id],
       );
-      const rawName = puskesmasRows[0]?.institution_name || "";
-      const puskesmasName = rawName
-        ? rawName.toLowerCase().includes("puskesmas")
-          ? rawName
-          : `Puskesmas ${rawName}`
-        : "Puskesmas";
+      const recWithParent = recRows[0];
 
-      await createNotification(
-        recWithParent.parent_user_id,
-        "Tindak Lanjut Rekomendasi",
-        `${puskesmasName} telah mengirimkan surat tindak lanjut untuk ${recWithParent.fm_fullName}. Silakan periksa halaman rekomendasi.`,
-        "intervention_created",
-        id,
-      );
+      if (recWithParent?.parent_user_id) {
+        const [puskesmasRows] = await pool.query(
+          `SELECT i.name AS institution_name
+           FROM users u
+           LEFT JOIN institutions i ON i.user_id = u.id
+           WHERE u.id = ? LIMIT 1`,
+          [user.id],
+        );
+        const rawName = puskesmasRows[0]?.institution_name || "";
+        const puskesmasName = rawName
+          ? rawName.toLowerCase().includes("puskesmas")
+            ? rawName
+            : `Puskesmas ${rawName}`
+          : "Puskesmas";
+
+        await createNotification(
+          recWithParent.parent_user_id,
+          "Tindak Lanjut Rekomendasi",
+          `${puskesmasName} telah mengirimkan surat tindak lanjut untuk ${recWithParent.fm_fullName}. Silakan periksa halaman rekomendasi.`,
+          "intervention_created",
+          id,
+        );
+      }
+    } catch (notifyErr) {
+      console.log("Failed to send intervention notification:", notifyErr.message);
     }
 
     res.status(201).json({
@@ -599,8 +608,12 @@ export const createIntervention = async (req, res) => {
       data: intervention,
     });
   } catch (err) {
-    if (connection) {
-      await connection.rollback();
+    if (connection && !committed) {
+      try {
+        await connection.rollback();
+      } catch (rollbackErr) {
+        console.log("Rollback failed:", rollbackErr.message);
+      }
     }
     console.log(err.message);
     return errorResponse(res, err, "Failed to get response");
@@ -741,37 +754,35 @@ export const getInterventionsBelongToInstitution = async (req, res) => {
     const keywordSql = keyword !== "" ? "AND fm.fullName LIKE ?" : "";
 
     const [rows] = await pool.query(
-      `SELECT * FROM (
-        SELECT
-          iv.id AS iv_id, iv.forType AS iv_forType, iv.notes AS iv_notes, iv.options AS iv_options, iv.createdAt AS iv_createdAt,
-          iv.recommendationId AS recommendationId,
-          r.id AS r_id, r.status AS r_status, r.createdAt AS r_createdAt,
-          st.nis AS st_nis,
-          cl.id AS cl_id, cl.name AS cl_name,
-          fm.fullName AS fm_fullName, fm.birthDate AS fm_birthDate, fm.gender AS fm_gender,
-          se.address AS se_address,
-          of2.id AS of2_id,
-          subu_i.id AS subu_i_id, subu_i.name AS subu_i_name,
-          vi.name AS vi_name, vi.address AS vi_address, vi.phone AS vi_phone, vi.email AS vi_email,
-          vu.username AS vu_username,
-          ROW_NUMBER() OVER (PARTITION BY iv.recommendationId ORDER BY iv.createdAt DESC) AS rn
-        FROM interventions iv
-        JOIN users vu ON vu.id = iv.user_id
-        JOIN institutions vi ON vi.user_id = vu.id
-        LEFT JOIN recommendations r ON r.id = iv.recommendationId
-        LEFT JOIN students st ON st.id = r.studentId
-        LEFT JOIN classes cl ON cl.id = st.classId
-        LEFT JOIN family_members fm ON fm.id = st.familyMemberId
-        LEFT JOIN socio_economic se ON se.id = fm.socioEconomicId
-        LEFT JOIN families f ON f.id = fm.familyId
-        LEFT JOIN users ofu ON ofu.id = f.userId
-        LEFT JOIN families of2 ON of2.userId = ofu.id
-        LEFT JOIN users subu ON subu.id = r.submittedById
-        LEFT JOIN institutions subu_i ON subu_i.user_id = subu.id
-        WHERE vi.id = ? ${keywordSql}
-      ) t
-      WHERE t.rn = 1
-      ORDER BY t.iv_createdAt DESC
+      `SELECT
+        iv.id AS iv_id, iv.forType AS iv_forType, iv.notes AS iv_notes, iv.options AS iv_options, iv.createdAt AS iv_createdAt,
+        r.id AS r_id, r.status AS r_status, r.createdAt AS r_createdAt,
+        st.nis AS st_nis,
+        cl.id AS cl_id, cl.name AS cl_name,
+        fm.fullName AS fm_fullName, fm.birthDate AS fm_birthDate, fm.gender AS fm_gender,
+        se.address AS se_address,
+        of2.id AS of2_id,
+        subu_i.id AS subu_i_id, subu_i.name AS subu_i_name,
+        vi.name AS vi_name, vi.address AS vi_address, vi.phone AS vi_phone, vi.email AS vi_email,
+        vu.username AS vu_username
+      FROM interventions iv
+      JOIN users vu ON vu.id = iv.user_id
+      JOIN institutions vi ON vi.user_id = vu.id
+      LEFT JOIN recommendations r ON r.id = iv.recommendationId
+      LEFT JOIN students st ON st.id = r.studentId
+      LEFT JOIN classes cl ON cl.id = st.classId
+      LEFT JOIN family_members fm ON fm.id = st.familyMemberId
+      LEFT JOIN socio_economic se ON se.id = fm.socioEconomicId
+      LEFT JOIN families f ON f.id = fm.familyId
+      LEFT JOIN users ofu ON ofu.id = f.userId
+      LEFT JOIN families of2 ON of2.userId = ofu.id
+      LEFT JOIN users subu ON subu.id = r.submittedById
+      LEFT JOIN institutions subu_i ON subu_i.user_id = subu.id
+      WHERE vi.id = ? ${keywordSql}
+        AND iv.createdAt = (
+          SELECT MAX(iv2.createdAt) FROM interventions iv2 WHERE iv2.recommendationId = iv.recommendationId
+        )
+      ORDER BY iv.createdAt DESC
       LIMIT 18446744073709551615 OFFSET ?`,
       [userInstitution.institution_id, ...keywordParams, skip],
     );

@@ -724,6 +724,43 @@ describe("createIntervention", () => {
     expect(mockConnection.release).toHaveBeenCalledTimes(1);
     expect(res.status).toHaveBeenCalledWith(500);
   });
+
+  it("still returns 201 with the committed result when the post-commit notification lookup fails, without rolling back", async () => {
+    const req = {
+      user: { id: "user-health-1", role: "healthcare" },
+      params: { id: "rec-1" },
+      body: { content: { note: "periksa gizi" }, forType: "PARENT", notes: "catatan" },
+    };
+    const res = mockRes();
+
+    randomUUID.mockReturnValueOnce("iv-uuid-1").mockReturnValueOnce("iv-uuid-2");
+
+    const mockConnection = {
+      beginTransaction: vi.fn(),
+      query: vi.fn(),
+      commit: vi.fn(),
+      rollback: vi.fn(),
+      release: vi.fn(),
+    };
+    pool.getConnection.mockResolvedValueOnce(mockConnection);
+    mockConnection.query
+      .mockResolvedValueOnce([{ affectedRows: 2 }]) // bulk INSERT
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE status
+
+    const notifyError = new Error("connection lost");
+    pool.query.mockRejectedValueOnce(notifyError); // recommendation -> parent lookup fails post-commit
+
+    await createIntervention(req, res);
+
+    expect(mockConnection.commit).toHaveBeenCalledTimes(1);
+    expect(mockConnection.rollback).not.toHaveBeenCalled();
+    expect(mockConnection.release).toHaveBeenCalledTimes(1);
+
+    expect(res.status).toHaveBeenCalledWith(201);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("Success");
+    expect(data.data).toEqual({ count: 2 });
+  });
 });
 
 describe("getSingleRecommendation", () => {
@@ -815,7 +852,7 @@ describe("getSingleRecommendation", () => {
 });
 
 describe("getInterventionsBelongToInstitution", () => {
-  it("dedupes to one intervention per recommendation via ROW_NUMBER, applies OFFSET with no LIMIT, and preserves the length-based totalPages bug", async () => {
+  it("dedupes to one intervention per recommendation via a correlated MAX(createdAt) subquery, applies OFFSET with no LIMIT, and preserves the length-based totalPages bug", async () => {
     const req = {
       user: { id: "user-health-1" },
       query: { page: "0", limit: "10", keyword: "" },
@@ -843,7 +880,10 @@ describe("getInterventionsBelongToInstitution", () => {
 
     await getInterventionsBelongToInstitution(req, res);
 
-    expect(pool.query.mock.calls[1][0]).toContain("ROW_NUMBER() OVER (PARTITION BY iv.recommendationId ORDER BY iv.createdAt DESC)");
+    expect(pool.query.mock.calls[1][0]).toContain("iv.createdAt = (");
+    expect(pool.query.mock.calls[1][0]).toContain(
+      "SELECT MAX(iv2.createdAt) FROM interventions iv2 WHERE iv2.recommendationId = iv.recommendationId",
+    );
     expect(pool.query.mock.calls[1][0]).toContain("LIMIT 18446744073709551615 OFFSET ?");
     expect(pool.query.mock.calls[1][1]).toEqual([5, 0]);
     expect(pool.query.mock.calls[2][1]).toEqual([["fam-2"]]);

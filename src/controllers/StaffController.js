@@ -35,24 +35,24 @@ export const addStaff = async (req, res) => {
       [username, email]
     );
     const isUserExist = existingRows[0];
-    console.log({ isUserExist });
     if (!!isUserExist) {
       throw new Error("User sudah ada");
-    }
-
-    const [roleRows] = await pool.query(`SELECT id FROM roles WHERE id = ?`, [6]);
-    let roleId;
-    if (roleRows[0]) {
-      roleId = 6;
-    } else {
-      const [roleInsert] = await pool.query(`INSERT INTO roles (name) VALUES (?)`, ["staff"]);
-      roleId = roleInsert.insertId;
     }
 
     const connection = await pool.getConnection();
     let newUser;
     try {
       await connection.beginTransaction();
+
+      const [roleRows] = await connection.query(`SELECT id FROM roles WHERE id = ?`, [6]);
+      let roleId;
+      if (roleRows[0]) {
+        roleId = 6;
+      } else {
+        const [roleInsert] = await connection.query(`INSERT INTO roles (name) VALUES (?)`, ["staff"]);
+        roleId = roleInsert.insertId;
+      }
+
       const userId = randomUUID();
       await connection.query(
         `INSERT INTO users (id, username, email, password, role_id) VALUES (?, ?, ?, ?, ?)`,

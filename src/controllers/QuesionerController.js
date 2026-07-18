@@ -136,8 +136,9 @@ export const updateQuestion = async (req, res) => {
   const { title, type, options } = req.body;
   const questionId = Number.parseInt(id);
 
-  const connection = await pool.getConnection();
+  let connection;
   try {
+    connection = await pool.getConnection();
     await connection.beginTransaction();
 
     await connection.query(
@@ -176,9 +177,13 @@ export const updateQuestion = async (req, res) => {
 
     return successResponse(res, question, "Question updated successfully");
   } catch (error) {
-    await connection.rollback();
+    if (connection) {
+      await connection.rollback();
+    }
     return errorResponse(res, error, "Failed to update question");
   } finally {
-    connection.release();
+    if (connection) {
+      connection.release();
+    }
   }
 };

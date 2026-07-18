@@ -62,10 +62,10 @@ describe("addStaff", () => {
 
     pool.query
       .mockResolvedValueOnce([[{ institution_id: 5 }], []]) // getUserInstitution
-      .mockResolvedValueOnce([[], []]) // existing user check -> none
-      .mockResolvedValueOnce([[{ id: 6 }], []]); // role 6 exists
+      .mockResolvedValueOnce([[], []]); // existing user check -> none
     pool.getConnection.mockResolvedValueOnce(connection);
     connection.query
+      .mockResolvedValueOnce([[{ id: 6 }], []]) // role 6 exists
       .mockResolvedValueOnce([{ insertId: 0 }]) // INSERT INTO users
       .mockResolvedValueOnce([{ insertId: 0 }]) // INSERT INTO staffs
       .mockResolvedValueOnce([[{ id: "user-id-1", username: "janenurse", email: "jane@example.com", password: "hashed-password", role_id: 6 }], []]) // reselect user
@@ -83,19 +83,19 @@ describe("addStaff", () => {
       expect.stringContaining("SELECT * FROM users WHERE username = ? AND email = ?"),
       ["janenurse", "jane@example.com"]
     );
-    expect(pool.query).toHaveBeenNthCalledWith(
-      3,
-      expect.stringContaining("SELECT id FROM roles WHERE id = ?"),
-      [6]
-    );
     expect(connection.beginTransaction).toHaveBeenCalled();
     expect(connection.query).toHaveBeenNthCalledWith(
       1,
+      expect.stringContaining("SELECT id FROM roles WHERE id = ?"),
+      [6]
+    );
+    expect(connection.query).toHaveBeenNthCalledWith(
+      2,
       expect.stringContaining("INSERT INTO users"),
       ["user-id-1", "janenurse", "jane@example.com", "hashed-password", 6]
     );
     expect(connection.query).toHaveBeenNthCalledWith(
-      2,
+      3,
       expect.stringContaining("INSERT INTO staffs"),
       ["staff-id-1", "Jane Nurse", "Jl. Sehat 1", "08123", 5, "staff", "user-id-1"]
     );
@@ -127,11 +127,11 @@ describe("addStaff", () => {
 
     pool.query
       .mockResolvedValueOnce([[{ institution_id: 5 }], []])
-      .mockResolvedValueOnce([[], []])
-      .mockResolvedValueOnce([[], []]) // role 6 not found
-      .mockResolvedValueOnce([{ insertId: 42 }]); // INSERT INTO roles
+      .mockResolvedValueOnce([[], []]);
     pool.getConnection.mockResolvedValueOnce(connection);
     connection.query
+      .mockResolvedValueOnce([[], []]) // role 6 not found
+      .mockResolvedValueOnce([{ insertId: 42 }]) // INSERT INTO roles
       .mockResolvedValueOnce([{ insertId: 0 }])
       .mockResolvedValueOnce([{ insertId: 0 }])
       .mockResolvedValueOnce([[{ id: "user-id-2" }], []])
@@ -139,9 +139,9 @@ describe("addStaff", () => {
 
     await addStaff(req, res);
 
-    expect(pool.query).toHaveBeenNthCalledWith(4, expect.stringContaining("INSERT INTO roles"), ["staff"]);
+    expect(connection.query).toHaveBeenNthCalledWith(2, expect.stringContaining("INSERT INTO roles"), ["staff"]);
     expect(connection.query).toHaveBeenNthCalledWith(
-      1,
+      3,
       expect.stringContaining("INSERT INTO users"),
       ["user-id-2", "u", "a@b.com", "hashed-password", 42]
     );
@@ -194,10 +194,10 @@ describe("addStaff", () => {
 
     pool.query
       .mockResolvedValueOnce([[{ institution_id: 5 }], []])
-      .mockResolvedValueOnce([[], []])
-      .mockResolvedValueOnce([[{ id: 6 }], []]);
+      .mockResolvedValueOnce([[], []]);
     pool.getConnection.mockResolvedValueOnce(connection);
     connection.query
+      .mockResolvedValueOnce([[{ id: 6 }], []]) // role 6 exists
       .mockResolvedValueOnce([{ insertId: 0 }]) // INSERT INTO users succeeds
       .mockRejectedValueOnce(new Error("duplicate key")); // INSERT INTO staffs fails
 
@@ -225,10 +225,10 @@ describe("addStaff", () => {
 
     pool.query
       .mockResolvedValueOnce([[{ institution_id: 5 }], []])
-      .mockResolvedValueOnce([[], []])
-      .mockResolvedValueOnce([[{ id: 6 }], []]);
+      .mockResolvedValueOnce([[], []]);
     pool.getConnection.mockResolvedValueOnce(connection);
     connection.query
+      .mockResolvedValueOnce([[{ id: 6 }], []]) // role 6 exists
       .mockResolvedValueOnce([{ insertId: 0 }])
       .mockResolvedValueOnce([{ insertId: 0 }])
       .mockResolvedValueOnce([[{ id: "user-id-4", username: "u", email: "a@b.com", password: "hashed-password", role_id: 6 }], []])
