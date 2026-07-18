@@ -1,10 +1,22 @@
-import express from "express";
-import cors from "cors";
 import dotenv from "dotenv";
-import cookieParser from "cookie-parser";
-import Routes from "./routes/Routes.js";
 
 dotenv.config();
+
+import { validateEnv } from "./config/validateEnv.js";
+
+validateEnv();
+
+// Routes.js transitively imports controllers/config/db.js, which reads
+// process.env.DATABASE_URL at module-evaluation time. Static imports are
+// hoisted and evaluated before the statements above, so Routes must be
+// imported dynamically here — after validateEnv() has run — otherwise a
+// missing/invalid env var surfaces as a cryptic mysql2 error instead of
+// the clear validateEnv() message.
+const { default: Routes } = await import("./routes/Routes.js");
+
+import express from "express";
+import cors from "cors";
+import cookieParser from "cookie-parser";
 
 const app = express();
 app.disable("x-powered-by");
