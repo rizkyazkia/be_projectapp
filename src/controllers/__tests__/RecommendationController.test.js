@@ -18,6 +18,7 @@ import {
   getResponseParent,
   getResponseInstitution,
   createIntervention,
+  getSingleRecommendation,
 } from "../RecommendationController.js";
 
 function mockRes() {
@@ -718,5 +719,93 @@ describe("createIntervention", () => {
     expect(mockConnection.commit).not.toHaveBeenCalled();
     expect(mockConnection.release).toHaveBeenCalledTimes(1);
     expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+describe("getSingleRecommendation", () => {
+  it("returns the full nested shape with no residence key", async () => {
+    const req = { params: { id: "rec-1" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "rec-1",
+            studentId: "st-1",
+            submittedById: "user-school-1",
+            healthcareInstitutionId: 5,
+            status: "COMPLETED",
+            pdfUrl: null,
+            createdAt: new Date("2026-01-01"),
+            updatedAt: new Date("2026-01-02"),
+            si_name: "SD Negeri 1",
+            student_id: "st-1",
+            student_nis: "12345",
+            student_schoolYear: "2025/2026",
+            student_semester: "1",
+            student_classId: 9,
+            class_id: 9,
+            class_name: "5A",
+            fm_id: "fm-1",
+            fm_fullName: "Budi",
+            fm_birthDate: new Date("2015-01-01"),
+            fm_gender: "L",
+            fm_relation: "ANAK",
+            fm_familyId: "fam-1",
+            family_id: "fam-1",
+            user_id: "user-parent-1",
+            user_family_id: "fam-1",
+          },
+        ],
+        [],
+      ]) // main row
+      .mockResolvedValueOnce([[{ id: "iv-1", forType: "PARENT" }], []]) // Intervention[]
+      .mockResolvedValueOnce([
+        [{ id: "fm-1", fullName: "Budi", birthDate: new Date("2015-01-01"), gender: "L", relation: "ANAK" }],
+        [],
+      ]); // siblings
+
+    await getSingleRecommendation(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const [data] = res.json.mock.calls[0];
+    expect(data.data.submittedBy).toEqual({ institution: { name: "SD Negeri 1" } });
+    expect(data.data.Intervention).toEqual([{ id: "iv-1", forType: "PARENT" }]);
+    expect(data.data.student.familyMember).not.toHaveProperty("residence");
+    expect(data.data.student.familyMember.family.user.family.familyMember).toEqual([
+      { id: "fm-1", fullName: "Budi", birthDate: new Date("2015-01-01"), gender: "L", relation: "ANAK" },
+    ]);
+  });
+
+  it("returns 200 with data: null when the recommendation id does not exist (no added 404 guard)", async () => {
+    const req = { params: { id: "missing" } };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]); // no matching row -> no Intervention/siblings queries run
+
+    await getSingleRecommendation(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(200);
+    const [data] = res.json.mock.calls[0];
+    expect(data.data).toBeNull();
+  });
+
+  it("returns a 500 error response when the main query rejects (genuine catch-block path)", async () => {
+    const req = { params: { id: "rec-1" } };
+    const res = mockRes();
+
+    const dbError = new Error("connection lost");
+    pool.query.mockRejectedValueOnce(dbError);
+
+    await getSingleRecommendation(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("error");
+    expect(data.message).toBe("Failed to get response");
+    expect(data.error).toBe("connection lost");
   });
 });

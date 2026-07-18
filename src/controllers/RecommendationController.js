@@ -617,40 +617,94 @@ export const createIntervention = async (req, res) => {
 export const getSingleRecommendation = async (req, res) => {
   try {
     const { id } = req.params;
-    const recommendation = await prisma.recommendation.findUnique({
-      where: {
-        id,
-      },
-      include: {
-        submittedBy: {
-          select: {
-            institution: {
-              select: {
-                name: true,
-              },
-            },
-          },
-        },
-        Intervention: true,
-        student: {
-          include: {
-            class: true,
-            familyMember: {
-              include: {
-                family: {
-                  include: {
-                    user: {
-                      include: { family: { include: { familyMember: true } } },
-                    },
-                  },
-                },
-                residence: true,
-              },
-            },
-          },
-        },
-      },
-    });
+
+    const [rows] = await pool.query(
+      `SELECT
+        r.id, r.studentId, r.submittedById, r.healthcareInstitutionId, r.status, r.pdfUrl, r.createdAt, r.updatedAt,
+        si.name AS si_name,
+        st.id AS student_id, st.nis AS student_nis, st.schoolYear AS student_schoolYear, st.semester AS student_semester, st.classId AS student_classId,
+        cl.id AS class_id, cl.name AS class_name,
+        fm.id AS fm_id, fm.fullName AS fm_fullName, fm.birthDate AS fm_birthDate, fm.gender AS fm_gender, fm.relation AS fm_relation, fm.familyId AS fm_familyId,
+        f.id AS family_id,
+        u.id AS user_id,
+        uf.id AS user_family_id
+      FROM recommendations r
+      LEFT JOIN users su ON su.id = r.submittedById
+      LEFT JOIN institutions si ON si.user_id = su.id
+      LEFT JOIN students st ON st.id = r.studentId
+      LEFT JOIN classes cl ON cl.id = st.classId
+      LEFT JOIN family_members fm ON fm.id = st.familyMemberId
+      LEFT JOIN families f ON f.id = fm.familyId
+      LEFT JOIN users u ON u.id = f.userId
+      LEFT JOIN families uf ON uf.userId = u.id
+      WHERE r.id = ?
+      LIMIT 1`,
+      [id],
+    );
+    const row = rows[0];
+
+    let recommendation = null;
+    if (row) {
+      const [interventionRows] = await pool.query(
+        "SELECT * FROM interventions WHERE recommendationId = ?",
+        [id],
+      );
+
+      let siblings = [];
+      if (row.user_family_id) {
+        const [siblingRows] = await pool.query(
+          "SELECT id, fullName, birthDate, gender, relation FROM family_members WHERE familyId = ?",
+          [row.user_family_id],
+        );
+        siblings = siblingRows;
+      }
+
+      recommendation = {
+        id: row.id,
+        studentId: row.studentId,
+        submittedById: row.submittedById,
+        healthcareInstitutionId: row.healthcareInstitutionId,
+        status: row.status,
+        pdfUrl: row.pdfUrl,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        submittedBy: { institution: row.si_name != null ? { name: row.si_name } : null },
+        Intervention: interventionRows,
+        student: row.student_id
+          ? {
+              id: row.student_id,
+              nis: row.student_nis,
+              schoolYear: row.student_schoolYear,
+              semester: row.student_semester,
+              classId: row.student_classId,
+              class: row.class_id ? { id: row.class_id, name: row.class_name } : null,
+              familyMember: row.fm_id
+                ? {
+                    id: row.fm_id,
+                    fullName: row.fm_fullName,
+                    birthDate: row.fm_birthDate,
+                    gender: row.fm_gender,
+                    relation: row.fm_relation,
+                    familyId: row.fm_familyId,
+                    family: row.family_id
+                      ? {
+                          id: row.family_id,
+                          user: row.user_id
+                            ? {
+                                id: row.user_id,
+                                family: row.user_family_id
+                                  ? { id: row.user_family_id, familyMember: siblings }
+                                  : null,
+                              }
+                            : null,
+                        }
+                      : null,
+                  }
+                : null,
+            }
+          : null,
+      };
+    }
 
     res.status(200).json({
       status: "Success",
