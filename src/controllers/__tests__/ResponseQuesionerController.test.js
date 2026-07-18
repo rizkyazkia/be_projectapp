@@ -175,4 +175,21 @@ describe("getResponseQuesioner", () => {
     expect(payload.data.questions).toEqual([]);
     expect(payload.data.answers).toEqual([]);
   });
+
+  it("returns 500 via the catch block when pool.query rejects unexpectedly", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" }, query: {} };
+    const res = mockRes();
+
+    pool.query.mockRejectedValueOnce(new Error("Connection lost"));
+
+    await getResponseQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Failed to get response",
+      error: "Connection lost",
+    });
+  });
 });
