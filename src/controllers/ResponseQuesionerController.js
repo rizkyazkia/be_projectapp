@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import { randomUUID } from "node:crypto";
 import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
 
@@ -121,46 +122,36 @@ export const createResponseQuesioner = async (req, res) => {
       return errorResponse(res, 400, "Data must be an array in 'answers'");
     }
 
-    const family = await prisma.family.findFirst({
-      where: {
-        userId: user.id,
-      },
-    });
+    const [families] = await pool.query(
+      "SELECT * FROM families WHERE userId = ? LIMIT 1",
+      [user.id]
+    );
+    const family = families[0];
 
     if (!family) {
       return errorResponse(res, 404, "Family not found");
     }
 
-    const familyMember = await prisma.familyMember.findFirst({
-      where: {
-        familyId: family.id,
-        OR: [
-          {
-            relation: "IBU",
-          },
-          {
-            relation: "AYAH",
-          },
-        ],
-      },
-    });
+    const [familyMembers] = await pool.query(
+      "SELECT * FROM family_members WHERE familyId = ? AND (relation = ? OR relation = ?) LIMIT 1",
+      [family.id, "IBU", "AYAH"]
+    );
+    const familyMember = familyMembers[0];
 
     if (!familyMember) {
       return errorResponse(res, 404, "Family member not found");
     }
 
-    const responseRecord = await prisma.response.create({
-      data: {
-        quisionerId: Number(id),
-        totalScore: 0,
-        familyMemberId: familyMember.id,
-        institutionId: null,
-      },
-    });
+    const responseId = randomUUID();
+
+    await pool.query(
+      "INSERT INTO responses (id, quisionerId, created_at, totalScore, familyMemberId, institutionId) VALUES (?, ?, NOW(3), ?, ?, ?)",
+      [responseId, Number(id), 0, familyMember.id, null]
+    );
 
     const sanitizedData = answers.map((item) => ({
       questionId: Number(item.questionId),
-      responseId: responseRecord.id,
+      responseId,
       option_id: Number(item.option_id),
       score: Number(item.score),
       boolean_value: item.boolean_value ? Boolean(item.boolean_value) : null,
@@ -192,25 +183,38 @@ export const createResponseQuesioner = async (req, res) => {
       }
     }
 
-    const response = await prisma.answer.createMany({
-      data: sanitizedData,
-    });
+    let insertResult = { affectedRows: 0 };
+    if (sanitizedData.length > 0) {
+      const values = sanitizedData.map((item) => [
+        item.questionId,
+        item.responseId,
+        item.option_id,
+        item.score,
+        item.boolean_value,
+        item.scaleValue,
+      ]);
+      const [result] = await pool.query(
+        "INSERT INTO answers (questionId, responseId, option_id, score, boolean_value, scaleValue) VALUES ?",
+        [values]
+      );
+      insertResult = result;
+    }
 
     const HitungScore = sanitizedData.reduce(
       (sum, item) => sum + (item.score || 0),
       0
     );
 
-    await prisma.response.update({
-      where: {
-        id: responseRecord.id,
-      },
-      data: {
-        totalScore: HitungScore,
-      },
-    });
+    await pool.query("UPDATE responses SET totalScore = ? WHERE id = ?", [
+      HitungScore,
+      responseId,
+    ]);
 
-    return successResponse(res, response, "Berhasil menjawab kuisioner");
+    return successResponse(
+      res,
+      { count: insertResult.affectedRows },
+      "Berhasil menjawab kuisioner"
+    );
   } catch (error) {
     return errorResponse(
       res,

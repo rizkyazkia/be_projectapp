@@ -3,9 +3,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../../config/db.js", () => ({
   default: { query: vi.fn(), getConnection: vi.fn() },
 }));
+vi.mock("node:crypto", () => ({
+  randomUUID: () => "11111111-1111-1111-1111-111111111111",
+}));
 
 import pool from "../../config/db.js";
-import { getResponseQuesioner } from "../ResponseQuesionerController.js";
+import {
+  getResponseQuesioner,
+  createResponseQuesioner,
+} from "../ResponseQuesionerController.js";
 
 function mockRes() {
   const res = {};
@@ -191,5 +197,121 @@ describe("getResponseQuesioner", () => {
       message: "Failed to get response",
       error: "Connection lost",
     });
+  });
+});
+
+describe("createResponseQuesioner", () => {
+  const UUID = "11111111-1111-1111-1111-111111111111";
+
+  it("inserts the response, bulk-inserts answers, and updates totalScore", async () => {
+    const req = {
+      user: { id: "user-1" },
+      params: { id: "5" },
+      body: {
+        answers: [
+          { questionId: 10, option_id: 100, score: 3, boolean_value: true, scaleValue: 2 },
+          { questionId: 11, option_id: 101, score: 1 },
+        ],
+      },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []]) // families
+      .mockResolvedValueOnce([
+        [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
+        [],
+      ]) // family_members
+      .mockResolvedValueOnce([{ affectedRows: 1, insertId: 0 }]) // INSERT responses
+      .mockResolvedValueOnce([{ affectedRows: 2 }]) // bulk INSERT answers
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE responses totalScore
+
+    await createResponseQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("INSERT INTO responses"),
+      [UUID, 5, 0, "member-1", null]
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining("INSERT INTO answers"),
+      [
+        [
+          [10, UUID, 100, 3, true, 2],
+          [11, UUID, 101, 1, null, null],
+        ],
+      ]
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      5,
+      expect.stringContaining("UPDATE responses SET totalScore"),
+      [4, UUID]
+    );
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "success",
+        data: { count: 2 },
+      })
+    );
+  });
+
+  it("returns 500 (401-as-error bug) when there is no user on the request", async () => {
+    const req = { user: null, params: { id: "5" }, body: { answers: [] } };
+    const res = mockRes();
+
+    await createResponseQuesioner(req, res);
+
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 401, message: "Unauthorized" })
+    );
+  });
+
+  it("returns 400 (as-error bug) when 'answers' is not an array", async () => {
+    const req = {
+      user: { id: "user-1" },
+      params: { id: "5" },
+      body: { answers: "not-an-array" },
+    };
+    const res = mockRes();
+
+    await createResponseQuesioner(req, res);
+
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: 400,
+        message: "Data must be an array in 'answers'",
+      })
+    );
+  });
+
+  it("skips the bulk insert and reports count:0 when answers is an empty array", async () => {
+    const req = {
+      user: { id: "user-1" },
+      params: { id: "5" },
+      body: { answers: [] },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []])
+      .mockResolvedValueOnce([
+        [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
+        [],
+      ])
+      .mockResolvedValueOnce([{ affectedRows: 1, insertId: 0 }]) // INSERT responses
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE responses totalScore (no bulk insert call)
+
+    await createResponseQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(4); // no INSERT INTO answers call
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { count: 0 } })
+    );
   });
 });
