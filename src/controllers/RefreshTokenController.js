@@ -1,27 +1,24 @@
-import { PrismaClient } from "@prisma/client";
 import jwt from "jsonwebtoken";
+import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
-
-const prisma = new PrismaClient();
 
 export const refreshToken = async (req, res) => {
   try {
     const refreshToken = req.cookies.refreshToken;
     if (!refreshToken)
       return errorResponse(res, null, "Refresh token tidak ditemukan");
-    const user = await prisma.user.findFirst({
-      where: {
-        refresh_token: refreshToken,
-      },
-      include: {
-        role: {
-          select: {
-            name: true,
-          },
-        },
-      },
-    });
-    if (!user) return errorResponse(res, null, "Refresh token tidak valid");
+    const [rows] = await pool.query(
+      `SELECT u.id, u.username, u.email, u.password, u.role_id, u.refresh_token,
+              u.created_at, u.updated_at, r.name AS role_name
+       FROM users u
+       LEFT JOIN roles r ON u.role_id = r.id
+       WHERE u.refresh_token = ?
+       LIMIT 1`,
+      [refreshToken]
+    );
+    const userRow = rows[0];
+    if (!userRow) return errorResponse(res, null, "Refresh token tidak valid");
+    const user = { ...userRow, role: { name: userRow.role_name } };
     jwt.verify(
       refreshToken,
       process.env.APP_REFRESH_TOKEN_SECRET,

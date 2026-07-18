@@ -1,7 +1,5 @@
-import { PrismaClient } from "@prisma/client";
+import pool from "../config/db.js";
 import { successResponse, errorResponse } from "../helpers/ResponseHelper.js";
-
-const prisma = new PrismaClient();
 
 export const calculateIMT = async (req, res) => {
   try {
@@ -14,17 +12,32 @@ export const calculateIMT = async (req, res) => {
     const ageYear = Math.floor(Number(ageMonths) / 12);
     const ageMonthRemainder = Number(ageMonths) % 12;
 
-    const bmiRef = await prisma.bmiReference.findFirst({
-      where: {
-        gender: gender === "L" ? "L" : "P",
-        ageYear: ageYear,
-        ageMonthFrom: { lte: ageMonthRemainder },
-        ageMonthTo: { gte: ageMonthRemainder },
-      },
-    });
+    const [rows] = await pool.query(
+      `SELECT id, ageYear, ageMonthFrom, ageMonthTo, gender,
+              sdMinus3Min, sdMinus3Max, sdMinus2Min, sdMinus2Max,
+              sdMinus1Min, sdMinus1Max, medianMin, medianMax,
+              sdPlus1Min, sdPlus1Max, sdPlus2Min, sdPlus2Max,
+              sdPlus3Min, sdPlus3Max, createdAt
+       FROM bmi_references
+       WHERE gender = ? AND ageYear = ? AND ageMonthFrom <= ? AND ageMonthTo >= ?
+       ORDER BY id ASC
+       LIMIT 1`,
+      [
+        gender === "L" ? "L" : "P",
+        ageYear,
+        ageMonthRemainder,
+        ageMonthRemainder,
+      ]
+    );
+    const bmiRef = rows[0];
 
     if (!bmiRef) {
-      return errorResponse(res, null, "Referensi BMI tidak ditemukan untuk usia ini", 404);
+      return errorResponse(
+        res,
+        null,
+        "Referensi BMI tidak ditemukan untuk usia ini",
+        404
+      );
     }
 
     const heightM = Number(heightCm) / 100;
@@ -35,7 +48,8 @@ export const calculateIMT = async (req, res) => {
 
     if (roundedBMI < bmiRef.sdMinus2Min) {
       bmiStatus = "Gizi Kurang (Wasted)";
-      bmiStatusDesc = "Anak kurus. Tingkatkan porsi protein hewani dan karbohidrat.";
+      bmiStatusDesc =
+        "Anak kurus. Tingkatkan porsi protein hewani dan karbohidrat.";
       bmiColor = "text-orange-600 bg-orange-50";
       recommendations = [
         "Berikan makanan padat nutrisi tinggi kalori (alpukat, telur rebus, keju, daging merah).",
@@ -45,7 +59,8 @@ export const calculateIMT = async (req, res) => {
       ];
     } else if (roundedBMI > bmiRef.sdPlus1Max) {
       bmiStatus = "Gizi Lebih / Obesitas";
-      bmiStatusDesc = "Berat anak berlebih. Kurangi gula dan perbanyak aktivitas fisik.";
+      bmiStatusDesc =
+        "Berat anak berlebih. Kurangi gula dan perbanyak aktivitas fisik.";
       bmiColor = "text-red-600 bg-red-50";
       recommendations = [
         "Kurangi minuman manis, jus kemasan, dan camilan tinggi tepung.",
@@ -55,7 +70,8 @@ export const calculateIMT = async (req, res) => {
       ];
     } else {
       bmiStatus = "Gizi Baik (Normal)";
-      bmiStatusDesc = "Proporsi berat terhadap tinggi anak seimbang dan sehat.";
+      bmiStatusDesc =
+        "Proporsi berat terhadap tinggi anak seimbang dan sehat.";
       bmiColor = "text-emerald-600 bg-emerald-50";
       recommendations = [
         "Berikan protein hewani (telur, ayam, ikan) setiap hari.",
