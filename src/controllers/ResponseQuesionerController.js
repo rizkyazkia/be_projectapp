@@ -229,40 +229,28 @@ export const checkAnsweredQuesioner = async (req, res) => {
     const user = req.user;
     const id = Number(req.params.id);
 
-    const family = await prisma.family.findFirst({
-      where: {
-        userId: user.id,
-      },
-    });
+    const [families] = await pool.query(
+      "SELECT * FROM families WHERE userId = ? LIMIT 1",
+      [user.id]
+    );
+    const family = families[0];
 
     if (!family) return errorResponse(res, 404, "Family not found");
 
-    const familyMember = await prisma.familyMember.findFirst({
-      where: {
-        familyId: family.id,
-        OR: [
-          {
-            relation: "IBU",
-          },
-          {
-            relation: "AYAH",
-          },
-        ],
-      },
-    });
+    const [familyMembers] = await pool.query(
+      "SELECT * FROM family_members WHERE familyId = ? AND (relation = ? OR relation = ?) LIMIT 1",
+      [family.id, "IBU", "AYAH"]
+    );
+    const familyMember = familyMembers[0];
 
     if (!familyMember)
       return errorResponse(res, 404, "Family member not found");
 
-    const response = await prisma.response.findFirst({
-      where: {
-        familyMemberId: familyMember.id,
-        quisionerId: id,
-      },
-      include: {
-        answers: true,
-      },
-    });
+    const [responses] = await pool.query(
+      "SELECT * FROM responses WHERE familyMemberId = ? AND quisionerId = ? LIMIT 1",
+      [familyMember.id, id]
+    );
+    const response = responses[0];
 
     if (!response) {
       return res.json({
@@ -274,13 +262,17 @@ export const checkAnsweredQuesioner = async (req, res) => {
       });
     }
 
-    const totalQuestions = await prisma.question.count({
-      where: { quesioner_id: id },
-    });
+    const [totalQuestionsResult] = await pool.query(
+      "SELECT COUNT(*) AS count FROM questions WHERE quesioner_id = ?",
+      [id]
+    );
+    const totalQuestions = totalQuestionsResult[0].count;
 
-    const totalAnswers = await prisma.answer.count({
-      where: { responseId: response.id },
-    });
+    const [totalAnswersResult] = await pool.query(
+      "SELECT COUNT(*) AS count FROM answers WHERE responseId = ?",
+      [response.id]
+    );
+    const totalAnswers = totalAnswersResult[0].count;
 
     return res.json({ answered: totalAnswers === totalQuestions });
   } catch (error) {

@@ -11,6 +11,7 @@ import pool from "../../config/db.js";
 import {
   getResponseQuesioner,
   createResponseQuesioner,
+  checkAnsweredQuesioner,
 } from "../ResponseQuesionerController.js";
 
 function mockRes() {
@@ -334,5 +335,105 @@ describe("createResponseQuesioner", () => {
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ data: { count: 0 } })
     );
+  });
+});
+
+describe("checkAnsweredQuesioner", () => {
+  it("returns answered:true when totalAnswers equals totalQuestions", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []])
+      .mockResolvedValueOnce([
+        [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
+        [],
+      ])
+      .mockResolvedValueOnce([[{ id: "resp-1", familyMemberId: "member-1" }], []]) // responses, no join
+      .mockResolvedValueOnce([[{ count: 3 }], []]) // totalQuestions
+      .mockResolvedValueOnce([[{ count: 3 }], []]); // totalAnswers
+
+    await checkAnsweredQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(5);
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("FROM responses WHERE familyMemberId"),
+      ["member-1", 5]
+    );
+    expect(res.json).toHaveBeenCalledWith({ answered: true });
+  });
+
+  it("returns answered:false when counts differ", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []])
+      .mockResolvedValueOnce([
+        [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
+        [],
+      ])
+      .mockResolvedValueOnce([[{ id: "resp-1", familyMemberId: "member-1" }], []])
+      .mockResolvedValueOnce([[{ count: 3 }], []])
+      .mockResolvedValueOnce([[{ count: 2 }], []]);
+
+    await checkAnsweredQuesioner(req, res);
+
+    expect(res.json).toHaveBeenCalledWith({ answered: false });
+  });
+
+  it("returns 500 (404-as-error bug) when family not found", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    await checkAnsweredQuesioner(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 404, message: "Family not found" })
+    );
+  });
+
+  it("returns the paginated-empty shape (page/totalPage/totalRows, no 'limit' key) when no response exists", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []])
+      .mockResolvedValueOnce([
+        [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
+        [],
+      ])
+      .mockResolvedValueOnce([[], []]); // no response
+
+    await checkAnsweredQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(3);
+    expect(res.json).toHaveBeenCalledWith({
+      answers: [],
+      questions: [],
+      page: 0,
+      totalPage: 0,
+      totalRows: 0,
+    });
+  });
+
+  it("returns 500 via the catch block when pool.query rejects unexpectedly", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query.mockRejectedValueOnce(new Error("Connection lost"));
+
+    await checkAnsweredQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Failed to check answered status",
+      error: "Connection lost",
+    });
   });
 });
