@@ -19,7 +19,7 @@ jobs:
 
       - name: Install dependencies and generate Prisma Client
         env:
-          PRISMA_CLI_BINARY_TARGETS: rhel-openssl-3.0.x
+          PRISMA_CLI_BINARY_TARGETS: debian-openssl-1.1.x
         run: |
           npm ci --omit=dev
           npx prisma generate
