@@ -1,9 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
 import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
 
-const prisma = new PrismaClient();
+const ALLOWED_FAMILY_MEMBER_FIELDS = [
+  "fullName",
+  "birthDate",
+  "age",
+  "education",
+  "gender",
+  "relation",
+  "phone",
+  "jobId",
+  "institutionId",
+  "socioEconomicId",
+  "familyId",
+];
 
 export const getFamily = async (req, res) => {
   try {
@@ -824,24 +835,80 @@ export const updateFamilyMember = async (req, res) => {
       ...fields
     } = req.body;
 
-    const familyMember = await prisma.familyMember.findUnique({
-      where: { id },
-      include: {
-        nutrition: true,
-        student: true,
-      },
-    });
+    const [rows] = await pool.query(
+      `SELECT fm.*,
+              nu.id AS nu_id, nu.height AS nu_height, nu.weight AS nu_weight,
+              nu.bmi AS nu_bmi, nu.nutritionStatusId AS nu_nutritionStatusId,
+              st.id AS st_id, st.nis AS st_nis, st.schoolYear AS st_schoolYear,
+              st.semester AS st_semester, st.schoolId AS st_schoolId, st.classId AS st_classId
+       FROM family_members fm
+       LEFT JOIN nutritions nu ON nu.familyMemberId = fm.id
+       LEFT JOIN students st ON st.familyMemberId = fm.id
+       WHERE fm.id = ?`,
+      [id],
+    );
+    const row = rows[0];
 
-    if (!familyMember) {
+    if (!row) {
       return errorResponse(res, null, "Family member not found");
     }
 
-    if (Object.keys(fields).length > 0) {
+    const familyMember = {
+      id: row.id,
+      fullName: row.fullName,
+      birthDate: row.birthDate,
+      age: row.age,
+      education: row.education,
+      jobId: row.jobId,
+      gender: row.gender,
+      relation: row.relation,
+      familyId: row.familyId,
+      institutionId: row.institutionId,
+      phone: row.phone,
+      isCompleted: !!row.isCompleted,
+      socioEconomicId: row.socioEconomicId,
+      nutrition: row.nu_id
+        ? [
+            {
+              id: row.nu_id,
+              height: row.nu_height,
+              weight: row.nu_weight,
+              bmi: row.nu_bmi,
+              nutritionStatusId: row.nu_nutritionStatusId,
+            },
+          ]
+        : [],
+      student: row.st_id
+        ? {
+            id: row.st_id,
+            nis: row.st_nis,
+            schoolYear: row.st_schoolYear,
+            semester: row.st_semester,
+            schoolId: row.st_schoolId,
+            classId: row.st_classId,
+          }
+        : null,
+    };
+
+    // SECURITY: `fields` is whatever is left of req.body after destructuring
+    // out the known nutrition/student/type keys above — i.e. arbitrary,
+    // caller-controlled JSON keys. The original Prisma code spread this
+    // directly into `data`, relying on Prisma's generated client to reject
+    // unknown columns. A raw `UPDATE ... SET ${key} = ?` has no such
+    // protection: an attacker-chosen key becomes a literal column/SQL
+    // fragment. Only allow-listed column names may reach the SQL string.
+    const updatableKeys = Object.keys(fields).filter((key) =>
+      ALLOWED_FAMILY_MEMBER_FIELDS.includes(key),
+    );
+
+    if (updatableKeys.length > 0) {
       if (fields.birthDate) fields.birthDate = new Date(fields.birthDate);
-      await prisma.familyMember.update({
-        where: { id },
-        data: fields,
-      });
+      const setClause = updatableKeys.map((key) => `${key} = ?`).join(", ");
+      const params = updatableKeys.map((key) => fields[key]);
+      await pool.query(`UPDATE family_members SET ${setClause} WHERE id = ?`, [
+        ...params,
+        id,
+      ]);
     }
 
     if (
@@ -865,14 +932,11 @@ export const updateFamilyMember = async (req, res) => {
           const ageYear = Math.floor(ageMonths / 12);
           const ageMonthRemainder = ageMonths % 12;
 
-          const bmiRef = await prisma.bmiReference.findFirst({
-            where: {
-              gender: familyMember.gender,
-              ageYear: ageYear,
-              ageMonthFrom: { lte: ageMonthRemainder },
-              ageMonthTo: { gte: ageMonthRemainder },
-            },
-          });
+          const [bmiRefRows] = await pool.query(
+            "SELECT * FROM bmi_references WHERE gender = ? AND ageYear = ? AND ageMonthFrom <= ? AND ageMonthTo >= ? LIMIT 1",
+            [familyMember.gender, ageYear, ageMonthRemainder, ageMonthRemainder],
+          );
+          const bmiRef = bmiRefRows[0];
 
           if (bmiRef) {
             let nutritionStatusEnum;
@@ -884,59 +948,68 @@ export const updateFamilyMember = async (req, res) => {
               nutritionStatusEnum = "GIZI_BAIK";
             }
 
-            const nutritionStatusRecord =
-              await prisma.nutritionStatus.findFirst({
-                where: { status: nutritionStatusEnum },
-              });
-            nutritionStatusId = nutritionStatusRecord?.id;
+            const [nutritionStatusRows] = await pool.query(
+              "SELECT * FROM nutrition_status WHERE status = ? LIMIT 1",
+              [nutritionStatusEnum],
+            );
+            nutritionStatusId = nutritionStatusRows[0]?.id;
           }
         }
       }
 
-      const nutritionUpdateData = {
-        ...(height !== undefined && { height: Number(height) }),
-        ...(weight !== undefined && { weight: Number(weight) }),
-        ...(bmi !== undefined && { bmi }),
-        ...(nutritionStatusId && { nutritionStatusId }),
-      };
+      const nutritionFields = {};
+      if (height !== undefined) nutritionFields.height = Number(height);
+      if (weight !== undefined) nutritionFields.weight = Number(weight);
+      if (bmi !== undefined) nutritionFields.bmi = bmi;
+      if (nutritionStatusId) nutritionFields.nutritionStatusId = nutritionStatusId;
 
-      await prisma.nutrition.update({
-        where: { id: familyMember.nutrition[0].id },
-        data: nutritionUpdateData,
-      });
-    }
-
-    if (type === "anak") {
-      const studentUpdateData = {
-        ...(nis !== undefined && { nis }),
-        ...(schoolYear !== undefined && { schoolYear }),
-        ...(semester !== undefined && { semester }),
-        ...(schoolId !== undefined && { schoolId }),
-        ...(classId !== undefined && { classId }),
-      };
-
-      if (Object.keys(studentUpdateData).length > 0 && familyMember.student) {
-        await prisma.student.update({
-          where: { id: familyMember.student.id },
-          data: studentUpdateData,
-        });
-      } else if (
-        Object.keys(studentUpdateData).length > 0 &&
-        !familyMember.student
-      ) {
-        await prisma.student.create({
-          data: {
-            ...studentUpdateData,
-            familyMemberId: familyMember.id,
-          },
-        });
+      const nutritionKeys = Object.keys(nutritionFields);
+      if (nutritionKeys.length > 0) {
+        const setClause = nutritionKeys.map((key) => `${key} = ?`).join(", ");
+        const params = nutritionKeys.map((key) => nutritionFields[key]);
+        await pool.query(`UPDATE nutritions SET ${setClause} WHERE id = ?`, [
+          ...params,
+          familyMember.nutrition[0].id,
+        ]);
       }
     }
 
-    await prisma.familyMember.update({
-      where: { id },
-      data: { isCompleted: true },
-    });
+    if (type === "anak") {
+      const studentFields = {};
+      if (nis !== undefined) studentFields.nis = nis;
+      if (schoolYear !== undefined) studentFields.schoolYear = schoolYear;
+      if (semester !== undefined) studentFields.semester = semester;
+      if (schoolId !== undefined) studentFields.schoolId = schoolId;
+      if (classId !== undefined) studentFields.classId = classId;
+
+      const studentKeys = Object.keys(studentFields);
+
+      if (studentKeys.length > 0 && familyMember.student) {
+        const setClause = studentKeys.map((key) => `${key} = ?`).join(", ");
+        const params = studentKeys.map((key) => studentFields[key]);
+        await pool.query(`UPDATE students SET ${setClause} WHERE id = ?`, [
+          ...params,
+          familyMember.student.id,
+        ]);
+      } else if (studentKeys.length > 0 && !familyMember.student) {
+        const newStudentId = randomUUID();
+        const columns = ["id", ...studentKeys, "familyMemberId"];
+        const values = [
+          newStudentId,
+          ...studentKeys.map((key) => studentFields[key]),
+          familyMember.id,
+        ];
+        await pool.query(
+          `INSERT INTO students (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+          values,
+        );
+      }
+    }
+
+    await pool.query("UPDATE family_members SET isCompleted = ? WHERE id = ?", [
+      true,
+      id,
+    ]);
 
     return successResponse(res, null, "Berhasil mengupdate anggota keluarga");
   } catch (error) {
@@ -948,23 +1021,36 @@ export const deleteFamilyMember = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const familyMember = await prisma.familyMember.findUnique({
-      where: { id },
-    });
+    const [rows] = await pool.query(
+      "SELECT * FROM family_members WHERE id = ?",
+      [id],
+    );
+    const familyMember = rows[0];
 
     if (!familyMember) {
       return errorResponse(res, null, "Family member not found");
     }
 
     if (familyMember.jobId) {
-      await prisma.job.delete({
-        where: { id: familyMember.jobId },
-      });
+      const [jobDeleteResult] = await pool.query(
+        "DELETE FROM jobs WHERE id = ?",
+        [familyMember.jobId],
+      );
+      if (jobDeleteResult.affectedRows === 0) {
+        // Raw DELETE doesn't throw on a missing row the way Prisma's
+        // `.delete()` does (P2025) — replicate that behavior explicitly so a
+        // race (job already deleted) still surfaces as an error here.
+        throw new Error("Record to delete does not exist.");
+      }
     }
 
-    await prisma.familyMember.delete({
-      where: { id },
-    });
+    const [fmDeleteResult] = await pool.query(
+      "DELETE FROM family_members WHERE id = ?",
+      [id],
+    );
+    if (fmDeleteResult.affectedRows === 0) {
+      throw new Error("Record to delete does not exist.");
+    }
 
     return successResponse(res, null, "Berhasil menghapus anggota keluarga");
   } catch (error) {

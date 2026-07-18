@@ -15,6 +15,8 @@ import {
   getFamilyMember,
   getParentsByFamilyMemberId,
   createFamilyMember,
+  updateFamilyMember,
+  deleteFamilyMember,
 } from "../FamilyController.js";
 
 function mockRes() {
@@ -785,5 +787,286 @@ describe("createFamilyMember", () => {
     expect(res.status).toHaveBeenCalledWith(500);
     const body = res.json.mock.calls[0][0];
     expect(body.message).toBe("Invalid type");
+  });
+});
+
+describe("updateFamilyMember", () => {
+  it("returns 'Family member not found' when the member does not exist", async () => {
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    const req = { params: { id: "missing-id" }, body: { fullName: "New Name" } };
+    const res = mockRes();
+
+    await updateFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Family member not found",
+      error: null,
+    });
+  });
+
+  it("updates only allow-listed fields, ignores an unrecognized column-name key (SQL injection guard), and always sets isCompleted = true", async () => {
+    pool.query
+      .mockResolvedValueOnce([
+        [{ id: "fm-1", fullName: "Old Name", gender: "L", birthDate: null }],
+        [],
+      ]) // fetch familyMember + nutrition + student (both empty via LEFT JOIN => no nu_id/st_id keys)
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // UPDATE family_members (allow-listed fields only)
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // final UPDATE isCompleted
+
+    const req = {
+      params: { id: "fm-1" },
+      body: {
+        fullName: "New Name",
+        phone: "0899",
+        // Attempted injection: not in ALLOWED_FAMILY_MEMBER_FIELDS, must be silently dropped.
+        "id = (SELECT 1); --": "malicious",
+      },
+    };
+    const res = mockRes();
+
+    await updateFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(3);
+    const [setSql, setParams] = pool.query.mock.calls[1];
+    expect(setSql).toContain("UPDATE family_members SET");
+    expect(setSql).not.toContain("id = (SELECT 1); --");
+    expect(setSql).toContain("fullName = ?");
+    expect(setSql).toContain("phone = ?");
+    expect(setParams).toEqual(["New Name", "0899", "fm-1"]);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("UPDATE family_members SET isCompleted = ? WHERE id = ?"),
+      [true, "fm-1"],
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  it("silently ignores the request when every body key is unrecognized (no family_members SET query at all)", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fm-1", fullName: "Old Name" }], []])
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // only the final isCompleted UPDATE
+
+    const req = {
+      params: { id: "fm-1" },
+      body: { "DROP TABLE family_members; --": "x" },
+    };
+    const res = mockRes();
+
+    await updateFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("SET isCompleted = ?"),
+      [true, "fm-1"],
+    );
+  });
+
+  it("updates nutrition height/weight/bmi/nutritionStatusId when type is anak and a nutrition row exists", async () => {
+    pool.query
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "fm-1",
+            gender: "L",
+            birthDate: new Date("2020-01-01"),
+            nu_id: 9,
+            nu_height: 80,
+            nu_weight: 10,
+            nu_bmi: 15.6,
+            nu_nutritionStatusId: 1,
+          },
+        ],
+        [],
+      ]) // fetch with nutrition present
+      .mockResolvedValueOnce([[{ sdMinus2Min: 14, sdPlus1Max: 20 }], []]) // bmi_references
+      .mockResolvedValueOnce([[{ id: 2, status: "GIZI_BAIK" }], []]) // nutrition_status
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // UPDATE nutritions
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // final isCompleted UPDATE
+
+    const req = {
+      params: { id: "fm-1" },
+      body: { type: "anak", height: "92", weight: "14" },
+    };
+    const res = mockRes();
+
+    await updateFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("FROM bmi_references WHERE gender = ?"),
+      expect.arrayContaining(["L"]),
+    );
+    const [nutritionSql, nutritionParams] = pool.query.mock.calls[3];
+    expect(nutritionSql).toContain("UPDATE nutritions SET");
+    expect(nutritionParams[nutritionParams.length - 1]).toBe(9);
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  it("creates a students row when type is anak, student fields are present, and no student exists yet", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fm-1", gender: "L", birthDate: null }], []]) // fetch, no nutrition/student
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // INSERT students
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // final isCompleted UPDATE
+
+    const req = {
+      params: { id: "fm-1" },
+      body: {
+        type: "anak",
+        nis: "999",
+        schoolYear: "2025/2026",
+        semester: "2",
+        schoolId: 4,
+        classId: 1,
+      },
+    };
+    const res = mockRes();
+
+    await updateFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("INSERT INTO students"),
+      ["uuid-1", "999", "2025/2026", "2", 4, 1, "fm-1"],
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  it("returns an error response when the initial fetch query fails", async () => {
+    pool.query.mockRejectedValueOnce(new Error("db down"));
+
+    const req = { params: { id: "fm-1" }, body: { fullName: "New Name" } };
+    const res = mockRes();
+
+    await updateFamilyMember(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    const body = res.json.mock.calls[0][0];
+    expect(body.status).toBe("error");
+    expect(body.message).toBe("Gagal mengupdate anggota keluarga");
+  });
+
+  it("returns an error response when the UPDATE family_members query fails", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fm-1", fullName: "Old Name" }], []])
+      .mockRejectedValueOnce(new Error("update failed"));
+
+    const req = { params: { id: "fm-1" }, body: { fullName: "New Name" } };
+    const res = mockRes();
+
+    await updateFamilyMember(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    const body = res.json.mock.calls[0][0];
+    expect(body.status).toBe("error");
+    expect(body.message).toBe("Gagal mengupdate anggota keluarga");
+  });
+});
+
+describe("deleteFamilyMember", () => {
+  it("deletes the job row then the family member when jobId is set", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fm-1", jobId: 42 }], []]) // fetch
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // DELETE jobs
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // DELETE family_members
+
+    const req = { params: { id: "fm-1" } };
+    const res = mockRes();
+
+    await deleteFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("DELETE FROM jobs WHERE id = ?"),
+      [42],
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("DELETE FROM family_members WHERE id = ?"),
+      ["fm-1"],
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  it("skips job deletion when jobId is null", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fm-1", jobId: null }], []])
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // DELETE family_members only
+
+    const req = { params: { id: "fm-1" } };
+    const res = mockRes();
+
+    await deleteFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  it("returns 'Family member not found' when the member does not exist", async () => {
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    const req = { params: { id: "missing-id" } };
+    const res = mockRes();
+
+    await deleteFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Family member not found",
+      error: null,
+    });
+  });
+
+  it("throws (replicating Prisma's P2025) when the job delete affects zero rows", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fm-1", jobId: 42 }], []])
+      .mockResolvedValueOnce([{ affectedRows: 0 }]); // DELETE jobs affected nothing
+
+    const req = { params: { id: "fm-1" } };
+    const res = mockRes();
+
+    await deleteFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const body = res.json.mock.calls[0][0];
+    expect(body.message).toBe("Gagal menghapus anggota keluarga");
+  });
+
+  it("throws (replicating Prisma's P2025) when the family_members delete affects zero rows", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fm-1", jobId: null }], []])
+      .mockResolvedValueOnce([{ affectedRows: 0 }]); // DELETE family_members affected nothing
+
+    const req = { params: { id: "fm-1" } };
+    const res = mockRes();
+
+    await deleteFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const body = res.json.mock.calls[0][0];
+    expect(body.message).toBe("Gagal menghapus anggota keluarga");
+  });
+
+  it("returns an error response when the initial fetch query fails", async () => {
+    pool.query.mockRejectedValueOnce(new Error("db down"));
+
+    const req = { params: { id: "fm-1" } };
+    const res = mockRes();
+
+    await deleteFamilyMember(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    const body = res.json.mock.calls[0][0];
+    expect(body.status).toBe("error");
+    expect(body.message).toBe("Gagal menghapus anggota keluarga");
   });
 });
