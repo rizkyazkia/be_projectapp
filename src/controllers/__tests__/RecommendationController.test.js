@@ -108,6 +108,105 @@ describe("getRecomendations", () => {
     });
   });
 
+  it("scopes to the school institution via the submittedById join and returns nested paginated data", async () => {
+    const req = {
+      user: { id: "u-school-1", role: "school" },
+      query: { page: "0", limit: "10" },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 9 }], []]) // institution lookup
+      .mockResolvedValueOnce([[{ count: 1 }], []]) // count query
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "rec-1",
+            status: "PENDING",
+            createdAt: new Date("2026-01-01"),
+            submittedBy_id: "u-school-1",
+            si_id: 9,
+            si_name: "SD Negeri 1",
+            si_address: "Jl. A",
+            si_phone: "0800",
+            si_email: "sd@x.com",
+            sic_id: 1,
+            sic_name: "Bandung",
+            sip_id: 1,
+            sip_name: "Jawa Barat",
+            student_id: "st-1",
+            student_nis: "12345",
+            student_schoolYear: "2025/2026",
+            student_semester: "1",
+            sti_id: 9,
+            sti_name: "SD Negeri 1",
+            sti_address: "Jl. A",
+            sti_phone: "0800",
+            sti_email: "sd@x.com",
+            stic_id: 1,
+            stic_name: "Bandung",
+            stip_id: 1,
+            stip_name: "Jawa Barat",
+            class_id: 9,
+            class_name: "5A",
+            fm_id: "fm-1",
+            fm_fullName: "Budi",
+            fm_birthDate: new Date("2015-01-01"),
+            fm_gender: "L",
+            fm_familyId: "fam-1",
+            se_id: 4,
+            se_address: "Jl. Rumah",
+          },
+        ],
+        [],
+      ]) // main list query
+      .mockResolvedValueOnce([
+        [{ id: 20, familyMemberId: "fm-1", ns_id: 2, ns_information: "Gizi Baik" }],
+        [],
+      ]); // nutrition follow-up query
+
+    await getRecomendations(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("FROM institutions WHERE user_id = ?"),
+      ["u-school-1"],
+    );
+
+    const countSql = pool.query.mock.calls[1][0];
+    expect(countSql).toContain("SELECT COUNT(*) AS count FROM recommendations r");
+    expect(countSql).toContain("LEFT JOIN users su ON su.id = r.submittedById");
+    expect(countSql).toContain("LEFT JOIN institutions si ON si.user_id = su.id");
+    expect(countSql).toContain("WHERE si.id = ?");
+    expect(pool.query.mock.calls[1][1]).toEqual([9]);
+
+    const listSql = pool.query.mock.calls[2][0];
+    expect(listSql).toContain("LEFT JOIN users su ON su.id = r.submittedById");
+    expect(listSql).toContain("LEFT JOIN institutions si ON si.user_id = su.id");
+    expect(listSql).toContain("WHERE si.id = ?");
+    expect(pool.query.mock.calls[2][1]).toEqual([9, 10, 0]);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining("FROM nutritions n"),
+      [["fm-1"]],
+    );
+
+    expect(res.status).not.toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("success");
+    expect(data.data.totalRows).toBe(1);
+    expect(data.data.recomend[0].submittedBy.institution).toEqual({
+      id: 9,
+      name: "SD Negeri 1",
+      address: "Jl. A",
+      phone: "0800",
+      email: "sd@x.com",
+      city: { id: 1, name: "Bandung" },
+      province: { id: 1, name: "Jawa Barat" },
+    });
+  });
+
   it("applies no institution filter and skips the nutrition query when no family members are returned", async () => {
     const req = {
       user: { id: "u-admin", role: "admin" },
