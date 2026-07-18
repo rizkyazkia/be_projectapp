@@ -1,0 +1,42 @@
+name: Deploy Backend to rumahweb
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Upload source via SCP
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.RUMAHWEB_SSH_HOST }}
+          port: ${{ secrets.RUMAHWEB_SSH_PORT }}
+          username: ${{ secrets.RUMAHWEB_SSH_USER }}
+          key: ${{ secrets.RUMAHWEB_SSH_KEY }}
+          source: "src/,prisma/,package.json,package-lock.json"
+          target: ${{ secrets.RUMAHWEB_BE_PATH }}
+          strip_components: 0
+
+      - name: Install deps, migrate DB, restart app
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.RUMAHWEB_SSH_HOST }}
+          port: ${{ secrets.RUMAHWEB_SSH_PORT }}
+          username: ${{ secrets.RUMAHWEB_SSH_USER }}
+          key: ${{ secrets.RUMAHWEB_SSH_KEY }}
+          script: |
+            set -e
+            # Activates the Node.js Selector virtualenv cPanel created for this app.
+            # Path looks like: /home/<cpanel_user>/nodevenv/<app_dir>/<node_version>
+            source ${{ secrets.RUMAHWEB_NODEVENV_PATH }}/bin/activate
+            cd ${{ secrets.RUMAHWEB_BE_PATH }}
+            npm ci --omit=dev
+            npx prisma generate
+            npx prisma migrate deploy
+            mkdir -p tmp && touch tmp/restart.txt
