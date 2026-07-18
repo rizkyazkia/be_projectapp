@@ -8,6 +8,8 @@ import pool from "../../config/db.js";
 import {
   getAdminDashboardSummary,
   getParentDashboardSummary,
+  getSchoolDashboardSummary,
+  getHealthcareDashboardSummary,
 } from "../StatisticsController.js";
 
 function mockReq(overrides = {}) {
@@ -613,6 +615,382 @@ describe("getParentDashboardSummary", () => {
       expect.objectContaining({
         status: "error",
         message: "Failed to get dashboard summary",
+      }),
+    );
+  });
+});
+
+describe("getSchoolDashboardSummary", () => {
+  it("returns the errorResponse default (500) shape when no institution matches user_id, issuing only 1 query", async () => {
+    pool.query.mockResolvedValueOnce([[], []]); // institutions lookup — empty
+    const res = mockRes();
+
+    await getSchoolDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(pool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("FROM institutions WHERE user_id = ?"),
+      ["user-1"],
+    );
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Institution not found",
+      error: null,
+    });
+  });
+
+  it("counts totalStudents/totalPartners against schoolId (camelCase) and totalClasses/totalTeachers against school_id (snake_case) — schema column casing is NOT uniform", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 55, user_id: "user-1" }], []]) // institution
+      .mockResolvedValueOnce([[{ count: 12 }], []]) // totalStudents
+      .mockResolvedValueOnce([[{ count: 3 }], []]) // totalClasses
+      .mockResolvedValueOnce([[{ count: 2 }], []]) // totalTeachers
+      .mockResolvedValueOnce([[{ count: 1 }], []]) // totalPartners
+      .mockResolvedValueOnce([[], []]) // nutrition rows
+      .mockResolvedValueOnce([[], []]) // classGroups
+      .mockResolvedValueOnce([[], []]); // quesioner lookup
+    const res = mockRes();
+
+    await getSchoolDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("FROM students WHERE schoolId = ?"),
+      [55],
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("FROM classes WHERE school_id = ?"),
+      [55],
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining("FROM teachers WHERE school_id = ?"),
+      [55],
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      5,
+      expect.stringContaining("FROM partnerships WHERE schoolId = ?"),
+      [55],
+    );
+    const body = res.json.mock.calls[0][0];
+    expect(body.data).toEqual(
+      expect.objectContaining({
+        totalStudents: 12,
+        totalClasses: 3,
+        totalTeachers: 2,
+        totalPartners: 1,
+      }),
+    );
+  });
+
+  it("nutritionDistribution reproduces the original bug: takes the FIRST nutrition row per member in (fm.id, n.id ASC) order, not the true latest", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 55, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([[{ count: 2 }], []])
+      .mockResolvedValueOnce([[{ count: 1 }], []])
+      .mockResolvedValueOnce([[{ count: 1 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([
+        [
+          // member fm-1 has TWO nutrition rows (n.id 10 then 20, ASC order).
+          // The bug-for-bug behavior takes n.id=10's status ("Gizi Kurang"),
+          // ignoring n.id=20's status ("Gizi Baik") even though 20 is the
+          // more-recently-inserted row. This is NOT "fixed" to be latest-first.
+          { familyMemberId: "fm-1", nutritionId: 10, displayName: "Gizi Kurang" },
+          { familyMemberId: "fm-1", nutritionId: 20, displayName: "Gizi Baik" },
+          // member fm-2 has zero nutrition rows -> Tidak Terdata
+          { familyMemberId: "fm-2", nutritionId: null, displayName: null },
+        ],
+        [],
+      ])
+      .mockResolvedValueOnce([[], []]) // classGroups
+      .mockResolvedValueOnce([[], []]); // quesioner
+    const res = mockRes();
+
+    await getSchoolDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      6,
+      expect.stringContaining("ORDER BY fm.id ASC, n.id ASC"),
+      [55],
+    );
+    const body = res.json.mock.calls[0][0];
+    expect(body.data.nutritionDistribution).toEqual(
+      expect.arrayContaining([
+        { displayName: "Gizi Kurang", total: 1 },
+        { displayName: "Tidak Terdata", total: 1 },
+      ]),
+    );
+    expect(body.data.nutritionDistribution).not.toEqual(
+      expect.arrayContaining([{ displayName: "Gizi Baik", total: 1 }]),
+    );
+  });
+
+  it("classGroups: groupBy does NOT zero-fill classes with no students, and skips the classes IN(?) lookup entirely when there are no groups", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 55, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[], []]) // nutrition rows
+      .mockResolvedValueOnce([[], []]) // classGroups — empty
+      .mockResolvedValueOnce([[], []]); // quesioner
+    const res = mockRes();
+
+    await getSchoolDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenCalledTimes(8); // classes IN(?) lookup skipped
+    const body = res.json.mock.calls[0][0];
+    expect(body.data.studentsPerClass).toEqual([]);
+  });
+
+  it("classGroups: defaults an orphaned classId (no matching row in classes) to 'Unknown'", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 55, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([[{ count: 5 }], []])
+      .mockResolvedValueOnce([[{ count: 1 }], []])
+      .mockResolvedValueOnce([[{ count: 1 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[], []])
+      .mockResolvedValueOnce([[{ classId: 7, count: "5" }], []]) // classGroups
+      .mockResolvedValueOnce([[], []]) // classes IN(?) — classId 7 not found
+      .mockResolvedValueOnce([[], []]); // quesioner
+    const res = mockRes();
+
+    await getSchoolDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      8,
+      expect.stringContaining("FROM classes WHERE id IN (?)"),
+      [[7]],
+    );
+    const body = res.json.mock.calls[0][0];
+    expect(body.data.studentsPerClass).toEqual([
+      { className: "Unknown", total: 5 },
+    ]);
+  });
+
+  it("questionnaireResult: skips the response lookup when quesioner is missing, leaving schoolConclusion null", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 55, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[], []])
+      .mockResolvedValueOnce([[], []])
+      .mockResolvedValueOnce([[], []]); // quesioner — not found
+    const res = mockRes();
+
+    await getSchoolDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenCalledTimes(8);
+    const body = res.json.mock.calls[0][0];
+    expect(body.data.questionnaireResult).toBeNull();
+    expect(body.data.schoolConclusion).toBeNull();
+  });
+
+  it("questionnaireResult: applies the 17-point Tinggi/Rendah threshold and builds the matching schoolConclusion when a response exists", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 55, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[], []])
+      .mockResolvedValueOnce([[], []])
+      .mockResolvedValueOnce([
+        [{ id: 9, title: "Pelayanan Kesehatan Sekolah" }],
+        [],
+      ]) // quesioner
+      .mockResolvedValueOnce([[{ id: "resp-1", totalScore: 10 }], []]); // response
+    const res = mockRes();
+
+    await getSchoolDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      9,
+      expect.stringContaining("ORDER BY created_at DESC"),
+      [55, 9],
+    );
+    const body = res.json.mock.calls[0][0];
+    expect(body.data.questionnaireResult).toEqual({
+      quesionerId: 9,
+      title: "Pelayanan Kesehatan Sekolah",
+      totalScore: 10,
+      interpretation: "Rendah",
+    });
+    expect(body.data.schoolConclusion.kategori).toBe(
+      "Pelayanan Kesehatan Sekolah Perlu Ditingkatkan",
+    );
+  });
+
+  it("returns the errorResponse shape when pool.query rejects", async () => {
+    pool.query.mockRejectedValueOnce(new Error("connection refused"));
+    const res = mockRes();
+
+    await getSchoolDashboardSummary(mockReq(), res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "error",
+        message: "Failed to get school dashboard summary",
+      }),
+    );
+  });
+});
+
+describe("getHealthcareDashboardSummary", () => {
+  it("returns the errorResponse default (500) shape when no institution matches user_id", async () => {
+    pool.query.mockResolvedValueOnce([[], []]); // institutions lookup — empty
+    const res = mockRes();
+
+    await getHealthcareDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Institution not found",
+      error: null,
+    });
+  });
+
+  it("recommendationsByStatus zero-fills all 3 statuses via 3 parallel COUNTs — NOT a groupBy — contrasting the admin dashboard's no-backfill groupBy", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 77, user_id: "user-1" }], []]) // institution
+      .mockResolvedValueOnce([[{ count: "5" }], []]) // pending
+      .mockResolvedValueOnce([[{ count: 2 }], []]) // processed
+      .mockResolvedValueOnce([[{ count: 0 }], []]) // completed — zero, but must still appear
+      .mockResolvedValueOnce([[{ count: 3 }], []]) // totalPartnerSchools
+      .mockResolvedValueOnce([[], []]); // recentRecs
+    const res = mockRes();
+
+    await getHealthcareDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("status = ?"),
+      [77, "PENDING"],
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(3, expect.any(String), [
+      77,
+      "PROCESSED",
+    ]);
+    expect(pool.query).toHaveBeenNthCalledWith(4, expect.any(String), [
+      77,
+      "COMPLETED",
+    ]);
+    const body = res.json.mock.calls[0][0];
+    expect(body.data.totalPending).toBe(5);
+    expect(body.data.totalProcessed).toBe(2);
+    expect(body.data.totalCompleted).toBe(0);
+    expect(body.data.recommendationsByStatus).toEqual([
+      { status: "PENDING", total: 5 },
+      { status: "PROCESSED", total: 2 },
+      { status: "COMPLETED", total: 0 }, // present even though zero — no dropping
+    ]);
+  });
+
+  it("totalPartnerSchools filters by the healthcareId column", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 77, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 4 }], []])
+      .mockResolvedValueOnce([[], []]);
+    const res = mockRes();
+
+    await getHealthcareDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      5,
+      expect.stringContaining("FROM partnerships WHERE healthcareId = ?"),
+      [77],
+    );
+    const body = res.json.mock.calls[0][0];
+    expect(body.data.totalPartnerSchools).toBe(4);
+  });
+
+  it("recentRecommendations reshapes flat joined rows into the genuinely nested student.{familyMember,institution,class} shape, emitting class: null (not {name: null}) when the LEFT JOIN finds no class", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 77, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([[{ count: 2 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 1 }], []])
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "rec-1",
+            createdAt: new Date("2026-07-15T00:00:00Z"),
+            nis: "12345",
+            familyMemberFullName: "Anak Satu",
+            institutionName: "School A",
+            className: "Kelas 1A",
+          },
+          {
+            id: "rec-2",
+            createdAt: new Date("2026-07-14T00:00:00Z"),
+            nis: "67890",
+            familyMemberFullName: "Anak Dua",
+            institutionName: "School B",
+            className: null, // no class assigned — LEFT JOIN found nothing
+          },
+        ],
+        [],
+      ]); // recentRecs
+    const res = mockRes();
+
+    await getHealthcareDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      6,
+      expect.stringContaining("LEFT JOIN classes"),
+      [77, "PENDING"],
+    );
+    const body = res.json.mock.calls[0][0];
+    expect(body.data.recentRecommendations).toEqual([
+      {
+        id: "rec-1",
+        createdAt: new Date("2026-07-15T00:00:00Z"),
+        student: {
+          nis: "12345",
+          familyMember: { fullName: "Anak Satu" },
+          institution: { name: "School A" },
+          class: { name: "Kelas 1A" },
+        },
+      },
+      {
+        id: "rec-2",
+        createdAt: new Date("2026-07-14T00:00:00Z"),
+        student: {
+          nis: "67890",
+          familyMember: { fullName: "Anak Dua" },
+          institution: { name: "School B" },
+          class: null,
+        },
+      },
+    ]);
+  });
+
+  it("returns the errorResponse shape when pool.query rejects", async () => {
+    pool.query.mockRejectedValueOnce(new Error("connection refused"));
+    const res = mockRes();
+
+    await getHealthcareDashboardSummary(mockReq(), res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "error",
+        message: "Failed to get healthcare dashboard summary",
       }),
     );
   });

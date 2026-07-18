@@ -534,72 +534,102 @@ export const getSchoolDashboardSummary = async (req, res) => {
   try {
     const user = req.user;
 
-    const institution = await prisma.institution.findUnique({
-      where: { user_id: user.id },
-    });
+    const [institutionRows] = await pool.query(
+      `SELECT id, user_id, name FROM institutions WHERE user_id = ? LIMIT 1`,
+      [user.id],
+    );
+    const institution = institutionRows[0] ?? null;
 
     if (!institution) return errorResponse(res, null, "Institution not found");
 
     const institutionId = institution.id;
 
-    const totalStudents = await prisma.student.count({
-      where: { schoolId: institutionId },
-    });
-    const totalClasses = await prisma.class.count({
-      where: { school_id: institutionId },
-    });
-    const totalTeachers = await prisma.teacher.count({
-      where: { school_id: institutionId },
-    });
-    const totalPartners = await prisma.partnership.count({
-      where: { schoolId: institutionId },
-    });
+    // NOTE the column-name inconsistency: students.schoolId and
+    // partnerships.schoolId are camelCase, but classes.school_id and
+    // teachers.school_id are snake_case. This mirrors the actual DB schema —
+    // do not "normalize" the casing, it would break these queries.
+    const [studentCountRows, classCountRows, teacherCountRows, partnerCountRows] =
+      await Promise.all([
+        pool.query(`SELECT COUNT(id) AS count FROM students WHERE schoolId = ?`, [
+          institutionId,
+        ]),
+        pool.query(`SELECT COUNT(id) AS count FROM classes WHERE school_id = ?`, [
+          institutionId,
+        ]),
+        pool.query(`SELECT COUNT(id) AS count FROM teachers WHERE school_id = ?`, [
+          institutionId,
+        ]),
+        pool.query(
+          `SELECT COUNT(id) AS count FROM partnerships WHERE schoolId = ?`,
+          [institutionId],
+        ),
+      ]);
+    const totalStudents = Number(studentCountRows[0][0].count);
+    const totalClasses = Number(classCountRows[0][0].count);
+    const totalTeachers = Number(teacherCountRows[0][0].count);
+    const totalPartners = Number(partnerCountRows[0][0].count);
 
-    const students = await prisma.familyMember.findMany({
-      where: { student: { schoolId: institutionId } },
-      select: {
-        nutrition: {
-          select: { nutritionStatus: { select: { displayName: true } } },
-        },
-      },
-    });
-
+    // Nutrition distribution — INTENTIONAL BUG-FOR-BUG REPRODUCTION. The
+    // original Prisma call has no orderBy/take on the nutrition relation, and
+    // the downstream JS reads array index [0] of an unsorted array — i.e. it
+    // reads whichever row the DB's default order happens to put first, NOT the
+    // true latest nutrition record. This is reproduced here by ordering
+    // (fm.id, n.id) ASC and taking the first nutrition row seen per member via
+    // a Set, NOT by ordering on updatedAt DESC like Task 34's two dashboards.
+    // Do not "fix" this to also be latest-first.
+    const [nutritionRows] = await pool.query(
+      `SELECT fm.id AS familyMemberId, n.id AS nutritionId, ns.displayName
+       FROM family_members fm
+       INNER JOIN students st ON st.familyMemberId = fm.id
+       LEFT JOIN nutritions n ON n.familyMemberId = fm.id
+       LEFT JOIN nutrition_status ns ON ns.id = n.nutritionStatusId
+       WHERE st.schoolId = ?
+       ORDER BY fm.id ASC, n.id ASC`,
+      [institutionId],
+    );
+    const seenMembers = new Set();
     const nutritionMap = {};
-    students.forEach((fm) => {
-      const name =
-        fm.nutrition?.[0]?.nutritionStatus?.displayName || "Tidak Terdata";
+    nutritionRows.forEach((row) => {
+      if (seenMembers.has(row.familyMemberId)) return;
+      seenMembers.add(row.familyMemberId);
+      const name = row.displayName || "Tidak Terdata";
       nutritionMap[name] = (nutritionMap[name] || 0) + 1;
     });
     const nutritionDistribution = Object.entries(nutritionMap).map(
       ([displayName, total]) => ({ displayName, total }),
     );
 
-    const classGroups = await prisma.student.groupBy({
-      by: ["classId"],
-      where: { schoolId: institutionId },
-      _count: { id: true },
-    });
+    // classGroups groupBy — no zero-fill
+    const [classGroups] = await pool.query(
+      `SELECT classId, COUNT(id) AS count FROM students WHERE schoolId = ? GROUP BY classId`,
+      [institutionId],
+    );
     const classIds = classGroups.map((g) => g.classId);
-    const classes = await prisma.class.findMany({
-      where: { id: { in: classIds } },
-      select: { id: true, name: true },
-    });
+    let classes = [];
+    if (classIds.length > 0) {
+      [classes] = await pool.query(
+        `SELECT id, name FROM classes WHERE id IN (?)`,
+        [classIds],
+      );
+    }
     const classMap = {};
     classes.forEach((c) => {
       classMap[c.id] = c.name;
     });
     const studentsPerClass = classGroups.map((g) => ({
       className: classMap[g.classId] || "Unknown",
-      total: g._count.id,
+      total: Number(g.count),
     }));
 
     const QUESTIONNAIRE_THRESHOLDS = {
       "Pelayanan Kesehatan Sekolah": { min: 17, good: "Tinggi", bad: "Rendah" },
     };
 
-    const quesioner = await prisma.quesioner.findFirst({
-      where: { title: "Pelayanan Kesehatan Sekolah" },
-    });
+    const [quesionerRows] = await pool.query(
+      `SELECT id, title FROM quesioners WHERE title = ? LIMIT 1`,
+      ["Pelayanan Kesehatan Sekolah"],
+    );
+    const quesioner = quesionerRows[0] ?? null;
 
     let questionnaireResult = null;
     let questionnaireProgress = 0;
@@ -608,13 +638,15 @@ export const getSchoolDashboardSummary = async (req, res) => {
 
     if (quesioner) {
       totalQuestionnaires = 1;
-      const response = await prisma.response.findFirst({
-        where: {
-          institutionId,
-          quisionerId: quesioner.id,
-        },
-        orderBy: { created_at: "desc" },
-      });
+      const [responseRows] = await pool.query(
+        `SELECT id, quisionerId, totalScore, institutionId, created_at
+         FROM responses
+         WHERE institutionId = ? AND quisionerId = ?
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [institutionId, quesioner.id],
+      );
+      const response = responseRows[0] ?? null;
 
       if (response) {
         answeredQuestionnaires = 1;
