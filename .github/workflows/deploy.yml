@@ -43,10 +43,11 @@ jobs:
             set -e
             cd ${{ secrets.RUMAHWEB_BE_PATH }}
             mkdir -p tmp && touch tmp/restart.txt
-            # node_modules (including the generated Prisma Client and its engine
-            # binary) is built entirely on the GitHub Actions runner and uploaded
-            # as-is - npm ci/prisma generate never run on the server itself,
-            # since this host's shared-hosting account can't sustain them
-            # (confirmed with rumahweb support: process/resource limits).
-            # Migrations are applied manually from a local machine against the
-            # external DB host for the same reason.
+            # node_modules is built entirely on the GitHub Actions runner and
+            # uploaded as-is - npm ci is never run on the server itself, since
+            # this host's shared-hosting account can't sustain it (confirmed
+            # with rumahweb support: process/resource limits). The backend has
+            # no Prisma dependency; prisma/schema.prisma and prisma/migrations/
+            # are kept only as historical schema documentation, and any schema
+            # change is applied manually as hand-authored SQL against the
+            # external DB host.
