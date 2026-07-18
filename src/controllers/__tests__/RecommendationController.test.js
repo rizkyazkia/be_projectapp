@@ -3,9 +3,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../../config/db.js", () => ({
   default: { query: vi.fn(), getConnection: vi.fn() },
 }));
+vi.mock("node:crypto", () => ({ randomUUID: vi.fn(() => "rec-uuid-1") }));
+vi.mock("../NotificationController.js", () => ({
+  createNotification: vi.fn(),
+}));
 
 import pool from "../../config/db.js";
-import { getRecomendations } from "../RecommendationController.js";
+import { randomUUID } from "node:crypto";
+import { createNotification } from "../NotificationController.js";
+import { getRecomendations, createRecommendation } from "../RecommendationController.js";
 
 function mockRes() {
   const res = {};
@@ -243,6 +249,144 @@ describe("getRecomendations", () => {
     const [data] = res.json.mock.calls[0];
     expect(data.status).toBe("error");
     expect(data.message).toBe("Internal server error");
+    expect(data.error).toBe("connection lost");
+  });
+});
+
+describe("createRecommendation", () => {
+  const baseReq = () => ({
+    user: { id: "user-school-1", role: "school" },
+    body: { familyMemberId: "fm-1", healthCareId: "5" },
+  });
+
+  it("creates a recommendation when studentId is omitted from the body (undefined-key guard)", async () => {
+    const req = baseReq(); // no studentId in body
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "st-1", familyMemberId: "fm-1", fm_fullName: "Budi" }], []]) // student lookup
+      .mockResolvedValueOnce([[], []]) // existing PENDING/PROCESSED check -> none
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // insert
+      .mockResolvedValueOnce([[{ id: 5, name: "Puskesmas A", user_id: "user-health-1" }], []]) // healthcare institution + user
+      .mockResolvedValueOnce([[{ id: 9, name: "SD Negeri 1" }], []]) // submitting school's own institution
+      .mockResolvedValueOnce([[{ id: "fm-1", fullName: "Budi", family_id: "fam-1", user_id: "user-parent-1" }], []]); // family member -> family -> user chain
+
+    await createRecommendation(req, res);
+
+    const [studentSql, studentParams] = pool.query.mock.calls[0];
+    expect(studentSql).toContain("FROM students s");
+    expect(studentSql).not.toContain("AND s.id = ?");
+    expect(studentParams).toEqual(["fm-1"]);
+
+    expect(pool.query.mock.calls[1][0]).toContain("status IN (?)");
+    expect(pool.query.mock.calls[1][1]).toEqual(["st-1", ["PENDING", "PROCESSED"]]);
+
+    expect(pool.query.mock.calls[2][0]).toContain("INSERT INTO recommendations");
+    expect(pool.query.mock.calls[2][1]).toEqual([
+      "rec-uuid-1",
+      "st-1",
+      "user-school-1",
+      5,
+      "PENDING",
+      null,
+      expect.any(Date),
+      expect.any(Date),
+    ]);
+
+    expect(pool.query).toHaveBeenCalledTimes(6);
+
+    expect(createNotification).toHaveBeenCalledTimes(2);
+    expect(createNotification).toHaveBeenNthCalledWith(
+      1,
+      "user-health-1",
+      "Rekomendasi Baru",
+      expect.stringContaining("Budi"),
+      "recommendation_received",
+      "rec-uuid-1",
+    );
+    expect(createNotification).toHaveBeenNthCalledWith(
+      2,
+      "user-parent-1",
+      "Rekomendasi Dikirim",
+      expect.stringContaining("Puskesmas A"),
+      "recommendation_sent",
+      "rec-uuid-1",
+    );
+
+    expect(res.status).not.toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.data.id).toBe("rec-uuid-1");
+    expect(data.data.status).toBe("PENDING");
+  });
+
+  it("includes s.id = ? when studentId IS present in the body", async () => {
+    const req = baseReq();
+    req.body.studentId = "st-2";
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "st-2", familyMemberId: "fm-1", fm_fullName: "Budi" }], []]) // student lookup
+      .mockResolvedValueOnce([[], []]) // existing check -> none
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // insert
+      .mockResolvedValueOnce([[], []]) // healthcare institution lookup -> no match, so notification block and school-institution lookup are both skipped
+      .mockResolvedValueOnce([[], []]); // family member -> family -> user chain -> no match, parent notification skipped
+
+    await createRecommendation(req, res);
+
+    const [studentSql, studentParams] = pool.query.mock.calls[0];
+    expect(studentSql).toContain("AND s.id = ?");
+    expect(studentParams).toEqual(["fm-1", "st-2"]);
+
+    expect(pool.query).toHaveBeenCalledTimes(5);
+    expect(createNotification).not.toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalledWith(500);
+  });
+
+  it("returns the guard-clause response (actual HTTP 500, per ResponseHelper's real arg order) when the user is not a school", async () => {
+    const req = { user: { id: "u1", role: "healthcare" }, body: {} };
+    const res = mockRes();
+
+    await createRecommendation(req, res);
+
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("error");
+    expect(data.error).toBe(403);
+    expect(data.message).toBe("User is not associated with an institution");
+  });
+
+  it("returns the guard-clause response when a PENDING/PROCESSED recommendation already exists for the student", async () => {
+    const req = baseReq();
+    req.body.studentId = "st-1";
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "st-1", familyMemberId: "fm-1", fm_fullName: "Budi" }], []])
+      .mockResolvedValueOnce([[{ id: "existing-rec" }], []]); // existing found
+
+    await createRecommendation(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.error).toBe(400);
+    expect(data.message).toBe("Murid ini sudah direkomendasikan sebelumnya");
+  });
+
+  it("returns a 500 error response when a query rejects", async () => {
+    const req = baseReq();
+    const res = mockRes();
+
+    const dbError = new Error("connection lost");
+    pool.query.mockRejectedValueOnce(dbError);
+
+    await createRecommendation(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("error");
+    expect(data.message).toBe("Failed to create recommendation");
     expect(data.error).toBe("connection lost");
   });
 });

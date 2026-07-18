@@ -177,26 +177,32 @@ export const createRecommendation = async (req, res) => {
       return errorResponse(res, 400, "familyMemberId is required");
     }
 
-    const student = await prisma.student.findFirst({
-      where: {
-        id: studentId,
-        familyMemberId,
-      },
-      include: { familyMember: { select: { fullName: true } } },
-    });
+    let studentSql = `
+      SELECT s.id, s.familyMemberId, fm.fullName AS fm_fullName
+      FROM students s
+      LEFT JOIN family_members fm ON fm.id = s.familyMemberId
+      WHERE s.familyMemberId = ?
+    `;
+    const studentParams = [familyMemberId];
+    if (studentId !== undefined) {
+      studentSql += " AND s.id = ?";
+      studentParams.push(studentId);
+    }
+    studentSql += " LIMIT 1";
+
+    const [studentRows] = await pool.query(studentSql, studentParams);
+    const student = studentRows[0];
 
     if (!student) {
       return errorResponse(res, 404, "Student (anak) not found");
     }
 
-    const existing = await prisma.recommendation.findFirst({
-      where: {
-        studentId: student.id,
-        status: { in: ["PENDING", "PROCESSED"] },
-      },
-    });
+    const [existingRows] = await pool.query(
+      "SELECT id FROM recommendations WHERE studentId = ? AND status IN (?)",
+      [student.id, ["PENDING", "PROCESSED"]],
+    );
 
-    if (existing) {
+    if (existingRows[0]) {
       return errorResponse(
         res,
         400,
@@ -204,32 +210,52 @@ export const createRecommendation = async (req, res) => {
       );
     }
 
-    const recommendation = await prisma.recommendation.create({
-      data: {
-        studentId: student.id,
-        submittedById: user.id,
-        healthcareInstitutionId: healthCareId ? Number(healthCareId) : null,
-        status: "PENDING",
-      },
-    });
+    const id = randomUUID();
+    const now = new Date();
+    const healthcareInstitutionId = healthCareId ? Number(healthCareId) : null;
+
+    await pool.query(
+      `INSERT INTO recommendations
+        (id, studentId, submittedById, healthcareInstitutionId, status, pdfUrl, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, student.id, user.id, healthcareInstitutionId, "PENDING", null, now, now],
+    );
+
+    const recommendation = {
+      id,
+      studentId: student.id,
+      submittedById: user.id,
+      healthcareInstitutionId,
+      status: "PENDING",
+      pdfUrl: null,
+      createdAt: now,
+      updatedAt: now,
+    };
 
     // Notifikasi ke puskesmas
-    const healthcareInstitution = healthCareId
-      ? await prisma.institution.findUnique({
-          where: { id: Number(healthCareId) },
-          include: { user: true },
-        })
-      : null;
+    let healthcareInstitution = null;
+    if (healthCareId) {
+      const [hcRows] = await pool.query(
+        `SELECT i.id, i.name, u.id AS user_id
+         FROM institutions i
+         LEFT JOIN users u ON u.id = i.user_id
+         WHERE i.id = ? LIMIT 1`,
+        [Number(healthCareId)],
+      );
+      healthcareInstitution = hcRows[0] || null;
+    }
 
-    if (healthcareInstitution?.user) {
-      const schoolInstitution = await prisma.institution.findFirst({
-        where: { user_id: user.id },
-      });
+    if (healthcareInstitution?.user_id) {
+      const [schoolInstRows] = await pool.query(
+        "SELECT id, name FROM institutions WHERE user_id = ? LIMIT 1",
+        [user.id],
+      );
+      const schoolInstitution = schoolInstRows[0] || null;
 
       await createNotification(
-        healthcareInstitution.user.id,
+        healthcareInstitution.user_id,
         "Rekomendasi Baru",
-        `Siswa ${student.familyMember?.fullName || "tersebut"} dari ${
+        `Siswa ${student.fm_fullName || "tersebut"} dari ${
           schoolInstitution?.name || "sekolah"
         } telah direkomendasikan untuk penanganan gizi. Silakan ditindaklanjuti.`,
         "recommendation_received",
@@ -238,18 +264,19 @@ export const createRecommendation = async (req, res) => {
     }
 
     // Notifikasi ke parent siswa
-    const familyMember = await prisma.familyMember.findUnique({
-      where: { id: student.familyMemberId },
-      include: {
-        family: {
-          include: { user: true },
-        },
-      },
-    });
+    const [familyMemberRows] = await pool.query(
+      `SELECT fm.id, fm.fullName, f.id AS family_id, u.id AS user_id
+       FROM family_members fm
+       LEFT JOIN families f ON f.id = fm.familyId
+       LEFT JOIN users u ON u.id = f.userId
+       WHERE fm.id = ? LIMIT 1`,
+      [student.familyMemberId],
+    );
+    const familyMember = familyMemberRows[0];
 
-    if (familyMember?.family?.user) {
+    if (familyMember?.user_id) {
       await createNotification(
-        familyMember.family.user.id,
+        familyMember.user_id,
         "Rekomendasi Dikirim",
         `Ananda ${familyMember.fullName} telah direkomendasikan ke Puskesmas ${
           healthcareInstitution?.name || "puskesmas"
