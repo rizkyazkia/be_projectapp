@@ -120,6 +120,19 @@ describe("getPartners", () => {
       [1, "%puskesmas%", "%puskesmas%", "%puskesmas%"]
     );
   });
+
+  it("returns a 500 'Failed to get partners' response when a query rejects", async () => {
+    pool.query.mockRejectedValueOnce(new Error("connection lost"));
+    const req = { user: { id: "user-1" }, query: {} };
+    const res = mockRes();
+
+    await getPartners(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "error", message: "Failed to get partners" })
+    );
+  });
 });
 
 describe("addPartners", () => {
@@ -174,6 +187,23 @@ describe("addPartners", () => {
       expect.objectContaining({ message: "Institution not found" })
     );
   });
+
+  it("returns a 500 'Failed to add partners' response when a query rejects", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1 }], []])
+      .mockRejectedValueOnce(new Error("connection lost"));
+    randomUUID.mockReturnValueOnce("uuid-1");
+
+    const req = { user: { id: "user-1" }, body: { healthcareIds: [9] } };
+    const res = mockRes();
+
+    await addPartners(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "error", message: "Failed to add partners" })
+    );
+  });
 });
 
 describe("deletePartner", () => {
@@ -197,6 +227,19 @@ describe("deletePartner", () => {
   it("throws to replicate Prisma's P2025 when no row is deleted", async () => {
     pool.query.mockResolvedValueOnce([{ affectedRows: 0 }]);
     const req = { params: { id: "missing" } };
+    const res = mockRes();
+
+    await deletePartner(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "error", message: "Failed to remove partner" })
+    );
+  });
+
+  it("returns a 500 'Failed to remove partner' response when the query itself rejects (distinct from the not-found case)", async () => {
+    pool.query.mockRejectedValueOnce(new Error("connection lost"));
+    const req = { params: { id: "pt-1" } };
     const res = mockRes();
 
     await deletePartner(req, res);
