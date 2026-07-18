@@ -15,6 +15,7 @@ import {
   updateResponseQuesioner,
   getResponseQuesionerInstitution,
   createResponseQuesionerInstitution,
+  checkAnsweredQuesionerInstitution,
 } from "../ResponseQuesionerController.js";
 
 function mockRes() {
@@ -844,6 +845,71 @@ describe("createResponseQuesionerInstitution", () => {
     expect(res.json).toHaveBeenCalledWith({
       status: "error",
       message: "Gagal menjawab kuisioner, silahkan diulang",
+      error: "Connection lost",
+    });
+  });
+});
+
+describe("checkAnsweredQuesionerInstitution", () => {
+  it("returns answered:true when totalAnswers equals totalQuestions", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, user_id: "user-1" }], []]) // institutions
+      .mockResolvedValueOnce([
+        [{ id: "resp-1", institutionId: 1, quisionerId: 5 }],
+        [],
+      ]) // responses
+      .mockResolvedValueOnce([[{ count: 4 }], []]) // totalQuestions
+      .mockResolvedValueOnce([[{ count: 4 }], []]); // totalAnswers
+
+    await checkAnsweredQuesionerInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(4);
+    expect(res.json).toHaveBeenCalledWith({ answered: true });
+  });
+
+  it("returns 500 (404-as-error bug) when institution not found", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    await checkAnsweredQuesionerInstitution(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 404, message: "Institution not found" })
+    );
+  });
+
+  it("returns the bare {answered:false} shape (distinct from checkAnsweredQuesioner's shape) when no response exists", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([[], []]); // no response
+
+    await checkAnsweredQuesionerInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(res.json).toHaveBeenCalledWith({ answered: false });
+  });
+
+  it("returns 500 via the catch block when pool.query rejects unexpectedly", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query.mockRejectedValueOnce(new Error("Connection lost"));
+
+    await checkAnsweredQuesionerInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Failed to check answered status",
       error: "Connection lost",
     });
   });

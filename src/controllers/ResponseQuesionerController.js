@@ -537,32 +537,37 @@ export const checkAnsweredQuesionerInstitution = async (req, res) => {
     const quesionerId = Number(req.params.id);
 
     // Cari institution milik user
-    const institution = await prisma.institution.findFirst({
-      where: { user_id: user.id },
-    });
+    const [institutions] = await pool.query(
+      "SELECT * FROM institutions WHERE user_id = ? LIMIT 1",
+      [user.id]
+    );
+    const institution = institutions[0];
 
     if (!institution) return errorResponse(res, 404, "Institution not found");
 
     // Cari response untuk institution & quesioner
-    const response = await prisma.response.findFirst({
-      where: {
-        institutionId: institution.id,
-        quisionerId: quesionerId,
-      },
-    });
+    const [responses] = await pool.query(
+      "SELECT * FROM responses WHERE institutionId = ? AND quisionerId = ? LIMIT 1",
+      [institution.id, quesionerId]
+    );
+    const response = responses[0];
 
     // Jika belum pernah menjawab, return answered: false
     if (!response) return res.json({ answered: false });
 
     // Hitung total pertanyaan pada quesioner
-    const totalQuestions = await prisma.question.count({
-      where: { quesioner_id: quesionerId },
-    });
+    const [totalQuestionsResult] = await pool.query(
+      "SELECT COUNT(*) AS count FROM questions WHERE quesioner_id = ?",
+      [quesionerId]
+    );
+    const totalQuestions = totalQuestionsResult[0].count;
 
     // Hitung total jawaban pada response
-    const totalAnswers = await prisma.answer.count({
-      where: { responseId: response.id },
-    });
+    const [totalAnswersResult] = await pool.query(
+      "SELECT COUNT(*) AS count FROM answers WHERE responseId = ?",
+      [response.id]
+    );
+    const totalAnswers = totalAnswersResult[0].count;
 
     return res.json({ answered: totalAnswers === totalQuestions });
   } catch (error) {
