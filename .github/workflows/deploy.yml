@@ -23,7 +23,7 @@ jobs:
           target: ${{ secrets.RUMAHWEB_BE_PATH }}
           strip_components: 0
 
-      - name: Install deps, migrate DB, restart app
+      - name: Install deps, restart app
         uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
         with:
           host: ${{ secrets.RUMAHWEB_SSH_HOST }}
@@ -36,7 +36,14 @@ jobs:
             # Path looks like: /home/<cpanel_user>/nodevenv/<app_dir>/<node_version>
             source ${{ secrets.RUMAHWEB_NODEVENV_PATH }}/bin/activate
             cd ${{ secrets.RUMAHWEB_BE_PATH }}
+            # Forces the correct engine binary at install time too - this host's
+            # platform auto-detection otherwise grabs an incompatible binary
+            # (debian-openssl-1.1.x) and @prisma/engines' postinstall crashes.
+            export PRISMA_CLI_BINARY_TARGETS=rhel-openssl-3.0.x
             npm ci --omit=dev
             npx prisma generate
-            npx prisma migrate deploy
             mkdir -p tmp && touch tmp/restart.txt
+            # Migrations are applied manually from a local machine against the
+            # external DB host (see README) instead of from the server itself:
+            # the shared hosting account's process limit gets exhausted when
+            # prisma migrate deploy is run on-box against this database.
