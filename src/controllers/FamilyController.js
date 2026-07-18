@@ -384,7 +384,7 @@ export const createFamilyMember = async (req, res) => {
             where: { id: existingFamilyMember.id },
             data: {
               fullName,
-              age: age ? Number.parseInt(age) : null,
+              age: age ? parseInt(age) : null,
               education,
               relation,
               familyId: familyByUser.id,
@@ -398,7 +398,7 @@ export const createFamilyMember = async (req, res) => {
           familyMember = await prisma.familyMember.create({
             data: {
               fullName,
-              age: age ? Number.parseInt(age) : null,
+              age: age ? parseInt(age) : null,
               education,
               relation,
               familyId: familyByUser.id,
@@ -464,7 +464,7 @@ export const createFamilyMember = async (req, res) => {
             where: { id: existingFamilyMember.id },
             data: {
               fullName,
-              age: age ? Number.parseInt(age) : null,
+              age: age ? parseInt(age) : null,
               education,
               relation,
               familyId: familyByUser.id,
@@ -478,7 +478,7 @@ export const createFamilyMember = async (req, res) => {
           familyMember = await prisma.familyMember.create({
             data: {
               fullName,
-              age: age ? Number.parseInt(age) : null,
+              age: age ? parseInt(age) : null,
               education,
               relation,
               familyId: familyByUser.id,
