@@ -438,74 +438,70 @@ export const getResponseInstitution = async (req, res) => {
     const search = req.query.search || "";
     const offset = limit * page;
 
-    const institution = await prisma.institution.findFirst({
-      where: {
-        user_id: userId,
-      },
-    });
+    const [institutionRows] = await pool.query(
+      "SELECT id FROM institutions WHERE user_id = ? LIMIT 1",
+      [userId],
+    );
+    const institution = institutionRows[0];
 
     if (!institution) {
       return errorResponse(res, 404, "Institution not found");
     }
 
-    const response = await prisma.response.findFirst({
-      where: {
-        institutionId: institution.id,
-      },
-    });
+    const [responseRows] = await pool.query(
+      "SELECT id FROM responses WHERE institutionId = ? LIMIT 1",
+      [institution.id],
+    );
+    const response = responseRows[0];
 
     if (!response) {
       return errorResponse(res, 404, "Response not found");
     }
 
-    const questions = await prisma.question.findMany({
-      where: {
-        quesioner_id: quesionerId,
-        title: {
-          contains: search,
-        },
-      },
-      select: {
-        id: true,
-        quesioner_id: true,
-        title: true,
-        type: true,
-        options: {
-          select: {
-            id: true,
-            title: true,
-            score: true,
-          },
-        },
-      },
-    });
+    const [questions] = await pool.query(
+      `SELECT id, quesioner_id, title, type FROM questions WHERE quesioner_id = ? AND title LIKE ?`,
+      [quesionerId, `%${search}%`],
+    );
 
     const questionIds = questions.map((q) => q.id);
+    const optionsByQuestion = new Map();
+    if (questionIds.length > 0) {
+      const [optionRows] = await pool.query(
+        "SELECT id, question_id, title, score FROM options WHERE question_id IN (?)",
+        [questionIds],
+      );
+      for (const o of optionRows) {
+        const list = optionsByQuestion.get(o.question_id) || [];
+        list.push({ id: o.id, title: o.title, score: o.score });
+        optionsByQuestion.set(o.question_id, list);
+      }
+    }
+    const questionsWithOptions = questions.map((q) => ({
+      id: q.id,
+      quesioner_id: q.quesioner_id,
+      title: q.title,
+      type: q.type,
+      options: optionsByQuestion.get(q.id) || [],
+    }));
 
-    const totalRows = await prisma.answer.count({
-      where: {
-        responseId: response.id,
-        questionId: {
-          in: questionIds,
-        },
-      },
-    });
+    let totalRows = 0;
+    let answers = [];
+    if (questionIds.length > 0) {
+      const [countRows] = await pool.query(
+        "SELECT COUNT(*) AS count FROM answers WHERE responseId = ? AND questionId IN (?)",
+        [response.id, questionIds],
+      );
+      totalRows = countRows[0].count;
+
+      const [answerRows] = await pool.query(
+        `SELECT * FROM answers WHERE responseId = ? AND questionId IN (?)
+         ORDER BY id ASC LIMIT ? OFFSET ?`,
+        [response.id, questionIds, limit, offset],
+      );
+      answers = answerRows;
+    }
 
     const totalPage = Math.ceil(totalRows / limit);
-
-    const answers = await prisma.answer.findMany({
-      where: {
-        responseId: response.id,
-        questionId: {
-          in: questionIds,
-        },
-      },
-      skip: offset,
-      take: limit,
-      orderBy: {
-        id: "asc",
-      },
-    });
 
     return successResponse(
       res,
@@ -514,7 +510,7 @@ export const getResponseInstitution = async (req, res) => {
         totalPage,
         page,
         limit,
-        questions,
+        questions: questionsWithOptions,
         answers,
       },
       "Berhasil mendapatkan data",

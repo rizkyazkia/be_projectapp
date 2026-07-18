@@ -16,6 +16,7 @@ import {
   createRecommendation,
   changeStatusToProcessed,
   getResponseParent,
+  getResponseInstitution,
 } from "../RecommendationController.js";
 
 function mockRes() {
@@ -538,6 +539,84 @@ describe("getResponseParent", () => {
     await getResponseParent(req, res);
 
     expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("error");
+    expect(data.message).toBe("Failed to get response");
+    expect(data.error).toBe("connection lost");
+  });
+});
+
+describe("getResponseInstitution", () => {
+  it("returns paginated answers scoped by responseId and questionId", async () => {
+    const req = {
+      body: { userId: "user-inst-1" },
+      params: { id: "3" },
+      query: { page: "0", limit: "10", search: "" },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 8 }], []]) // institution lookup
+      .mockResolvedValueOnce([[{ id: "resp-1" }], []]) // response lookup
+      .mockResolvedValueOnce([[{ id: 1, quesioner_id: 3, title: "Q1", type: "BOOLEAN" }], []]) // questions
+      .mockResolvedValueOnce([[{ id: 11, question_id: 1, title: "Ya", score: 1 }], []]) // options
+      .mockResolvedValueOnce([[{ count: 2 }], []]) // answers count
+      .mockResolvedValueOnce([[{ id: 200, responseId: "resp-1", questionId: 1 }], []]); // answers
+
+    await getResponseInstitution(req, res);
+
+    expect(pool.query.mock.calls[2][1]).toEqual([3, "%%"]);
+    expect(pool.query.mock.calls[4][1]).toEqual(["resp-1", [1]]);
+    expect(pool.query.mock.calls[5][1]).toEqual(["resp-1", [1], 10, 0]);
+
+    expect(res.status).not.toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.data.totalRows).toBe(2);
+    expect(data.data.answers).toEqual([{ id: 200, responseId: "resp-1", questionId: 1 }]);
+  });
+
+  it("skips the answers query when no questions match (empty questionIds guard)", async () => {
+    const req = { body: { userId: "user-inst-1" }, params: { id: "3" }, query: {} };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 8 }], []])
+      .mockResolvedValueOnce([[{ id: "resp-1" }], []])
+      .mockResolvedValueOnce([[], []]); // no questions
+
+    await getResponseInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(3);
+    const [data] = res.json.mock.calls[0];
+    expect(data.data.totalRows).toBe(0);
+    expect(data.data.answers).toEqual([]);
+  });
+
+  it("returns the guard-clause response (actual HTTP 500) when the institution is not found", async () => {
+    const req = { body: { userId: "no-such-user" }, params: { id: "3" }, query: {} };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    await getResponseInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.error).toBe(404);
+    expect(data.message).toBe("Institution not found");
+  });
+
+  it("returns a 500 error response when a query rejects", async () => {
+    const req = { body: { userId: "user-inst-1" }, params: { id: "3" }, query: {} };
+    const res = mockRes();
+
+    const dbError = new Error("connection lost");
+    pool.query.mockRejectedValueOnce(dbError);
+
+    await getResponseInstitution(req, res);
+
     expect(res.status).toHaveBeenCalledWith(500);
     const [data] = res.json.mock.calls[0];
     expect(data.status).toBe("error");
