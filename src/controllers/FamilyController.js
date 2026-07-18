@@ -1,28 +1,33 @@
 import { PrismaClient } from "@prisma/client";
+import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
 
 const prisma = new PrismaClient();
 
 export const getFamily = async (req, res) => {
   try {
-    const family = await prisma.family.findMany({
-      select: {
-        id: true,
-        user: {
-          select: {
-            id: true,
-            username: true,
-            email: true,
-            role: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-          },
+    const [rows] = await pool.query(
+      `SELECT f.id AS family_id,
+              u.id AS user_id, u.username AS user_username, u.email AS user_email,
+              r.id AS role_id, r.name AS role_name
+       FROM families f
+       JOIN users u ON u.id = f.userId
+       JOIN roles r ON r.id = u.role_id`,
+    );
+
+    const family = rows.map((row) => ({
+      id: row.family_id,
+      user: {
+        id: row.user_id,
+        username: row.user_username,
+        email: row.user_email,
+        role: {
+          id: row.role_id,
+          name: row.role_name,
         },
       },
-    });
+    }));
+
     return successResponse(res, family, "Family retrieved successfully");
   } catch (error) {
     return errorResponse(res, error, "Failed to retrieve family");
@@ -30,142 +35,158 @@ export const getFamily = async (req, res) => {
 };
 
 export const getFamilyMemberByUser = async (req, res) => {
-  const page = parseInt(req.query.page) || 0;
-  const limit = parseInt(req.query.limit) || 10;
+  const page = Number.parseInt(req.query.page) || 0;
+  const limit = Number.parseInt(req.query.limit) || 10;
   const search = req.query.search || "";
   const offset = limit * page;
 
   try {
     const user = req.user;
 
-    const family = await prisma.family.findMany({
-      where: {
-        userId: user.id,
-      },
-    });
+    const [familyRows] = await pool.query(
+      "SELECT * FROM families WHERE userId = ?",
+      [user.id],
+    );
+    const family = familyRows;
 
+    // `family` is always an array (possibly empty) — even a zero-row raw
+    // SELECT returns `[]`, which is truthy — so this guard never fires. This
+    // mirrors the original Prisma `findMany()` behavior exactly and is
+    // preserved as intentional dead code rather than "fixed" to `.length === 0`.
     if (!family) {
       return errorResponse(res, null, "Family not found");
     }
 
-    const totalRows = await prisma.familyMember.count({
-      where: {
-        familyId: {
-          in: family.map((family) => family.id),
-        },
-        OR: [
-          {
-            fullName: {
-              contains: search,
-            },
-          },
-        ],
-      },
-    });
+    const familyIds = family.map((f) => f.id);
 
+    if (familyIds.length === 0) {
+      // An empty `IN ()` is a MySQL syntax error, and there is nothing to
+      // find anyway if the user has no families, so short-circuit here.
+      return successResponse(
+        res,
+        { totalRows: 0, totalPage: 0, page, limit, familyMembers: [] },
+        "Family Member retrieved successfully",
+      );
+    }
+
+    const [countRows] = await pool.query(
+      "SELECT COUNT(*) AS count FROM family_members WHERE familyId IN (?) AND fullName LIKE ?",
+      [familyIds, `%${search}%`],
+    );
+    const totalRows = countRows[0].count;
     const totalPage = Math.ceil(totalRows / limit);
-    const familyMembers = await prisma.familyMember.findMany({
-      where: {
-        familyId: {
-          in: family.map((family) => family.id),
-        },
-        OR: [
-          {
-            fullName: {
-              contains: search,
-            },
-          },
-        ],
+
+    // NOTE: the original Prisma code computes `offset`/`limit` above but never
+    // passes them to `findMany` — no pagination is actually applied to this
+    // query. Preserved exactly: no LIMIT/OFFSET below.
+    const [rows] = await pool.query(
+      `SELECT
+         fm.id AS fm_id, fm.fullName AS fm_fullName, fm.birthDate AS fm_birthDate,
+         fm.age AS fm_age, fm.education AS fm_education, fm.gender AS fm_gender,
+         fm.relation AS fm_relation, fm.phone AS fm_phone, fm.isCompleted AS fm_isCompleted,
+         job.id AS job_id,
+         jobType.id AS jobType_id, jobType.name AS jobType_name,
+         se.id AS se_id, se.residenceStatus AS se_residenceStatus, se.address AS se_address,
+         se.childrenCount AS se_childrenCount, se.underFiveCount AS se_underFiveCount,
+         se.familyIncomeLevel AS se_familyIncomeLevel,
+         nu.id AS nu_id, nu.height AS nu_height, nu.weight AS nu_weight, nu.bmi AS nu_bmi,
+         ns.id AS ns_id, ns.information AS ns_information, ns.displayName AS ns_displayName,
+         st.id AS st_id, st.nis AS st_nis, st.schoolYear AS st_schoolYear, st.semester AS st_semester,
+         class.id AS class_id, class.name AS class_name,
+         inst.id AS inst_id, inst.name AS inst_name, inst.email AS inst_email,
+         inst.address AS inst_address, inst.phone AS inst_phone,
+         itp.id AS itp_id, itp.name AS itp_name,
+         prov.id AS prov_id, prov.name AS prov_name,
+         city.id AS city_id, city.name AS city_name
+       FROM family_members fm
+       LEFT JOIN jobs job ON job.id = fm.jobId
+       LEFT JOIN job_types jobType ON jobType.id = job.jobTypeId
+       JOIN socio_economic se ON se.id = fm.socioEconomicId
+       LEFT JOIN nutritions nu ON nu.familyMemberId = fm.id
+       LEFT JOIN nutrition_status ns ON ns.id = nu.nutritionStatusId
+       LEFT JOIN students st ON st.familyMemberId = fm.id
+       LEFT JOIN classes class ON class.id = st.classId
+       LEFT JOIN institutions inst ON inst.id = st.schoolId
+       LEFT JOIN institution_types itp ON itp.id = inst.type
+       LEFT JOIN provinces prov ON prov.id = inst.province_id
+       LEFT JOIN cities city ON city.id = inst.city_id
+       WHERE fm.familyId IN (?) AND fm.fullName LIKE ?`,
+      [familyIds, `%${search}%`],
+    );
+
+    const familyMembers = rows.map((row) => ({
+      id: row.fm_id,
+      fullName: row.fm_fullName,
+      birthDate: row.fm_birthDate,
+      age: row.fm_age,
+      education: row.fm_education,
+      gender: row.fm_gender,
+      relation: row.fm_relation,
+      phone: row.fm_phone,
+      job: row.job_id
+        ? {
+            id: row.job_id,
+            jobType: row.jobType_id
+              ? { id: row.jobType_id, name: row.jobType_name }
+              : null,
+          }
+        : null,
+      SocioEconomic: {
+        id: row.se_id,
+        residenceStatus: row.se_residenceStatus,
+        address: row.se_address,
+        childrenCount: row.se_childrenCount,
+        underFiveCount: row.se_underFiveCount,
+        familyIncomeLevel: row.se_familyIncomeLevel,
       },
-      select: {
-        id: true,
-        fullName: true,
-        birthDate: true,
-        age: true,
-        education: true,
-        gender: true,
-        relation: true,
-        phone: true,
-        job: {
-          select: {
-            id: true,
-            jobType: {
-              select: {
-                id: true,
-                name: true,
-              },
+      nutrition: row.nu_id
+        ? [
+            {
+              id: row.nu_id,
+              height: row.nu_height,
+              weight: row.nu_weight,
+              bmi: row.nu_bmi,
+              nutritionStatus: row.ns_id
+                ? {
+                    id: row.ns_id,
+                    information: row.ns_information,
+                    displayName: row.ns_displayName,
+                  }
+                : null,
             },
-          },
-        },
-        SocioEconomic: {
-          select: {
-            id: true,
-            residenceStatus: true,
-            address: true,
-            childrenCount: true,
-            underFiveCount: true,
-            familyIncomeLevel: true,
-          },
-        },
-        nutrition: {
-          select: {
-            id: true,
-            height: true,
-            weight: true,
-            bmi: true,
-            nutritionStatus: {
-              select: {
-                id: true,
-                information: true,
-                displayName: true,
-              },
-            },
-          },
-        },
-        student: {
-          select: {
-            id: true,
-            nis: true,
-            schoolYear: true,
-            semester: true,
-            class: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-            institution: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                address: true,
-                institution_type: {
-                  select: {
-                    id: true,
-                    name: true,
-                  },
-                },
-                phone: true,
-                province: {
-                  select: {
-                    id: true,
-                    name: true,
-                  },
-                },
-                city: {
-                  select: {
-                    id: true,
-                    name: true,
-                  },
-                },
-              },
-            },
-          },
-        },
-        isCompleted: true,
-      },
-    });
+          ]
+        : [],
+      student: row.st_id
+        ? {
+            id: row.st_id,
+            nis: row.st_nis,
+            schoolYear: row.st_schoolYear,
+            semester: row.st_semester,
+            class: row.class_id
+              ? { id: row.class_id, name: row.class_name }
+              : null,
+            institution: row.inst_id
+              ? {
+                  id: row.inst_id,
+                  name: row.inst_name,
+                  email: row.inst_email,
+                  address: row.inst_address,
+                  institution_type: row.itp_id
+                    ? { id: row.itp_id, name: row.itp_name }
+                    : null,
+                  phone: row.inst_phone,
+                  province: row.prov_id
+                    ? { id: row.prov_id, name: row.prov_name }
+                    : null,
+                  city: row.city_id
+                    ? { id: row.city_id, name: row.city_name }
+                    : null,
+                }
+              : null,
+          }
+        : null,
+      isCompleted: !!row.fm_isCompleted,
+    }));
 
     return successResponse(
       res,
@@ -178,33 +199,29 @@ export const getFamilyMemberByUser = async (req, res) => {
 };
 
 export const getFamilyMember = async (req, res) => {
-  const page = parseInt(req.query.page) || 0;
-  const limit = parseInt(req.query.limit) || 10;
+  const page = Number.parseInt(req.query.page) || 0;
+  const limit = Number.parseInt(req.query.limit) || 10;
   const search = req.query.search || "";
   const offset = limit * page;
 
   try {
-    const totalRows = await prisma.familyMember.count({
-      where: {
-        fullName: {
-          contains: search,
-        },
-      },
-    });
-
+    const [countRows] = await pool.query(
+      "SELECT COUNT(*) AS count FROM family_members WHERE fullName LIKE ?",
+      [`%${search}%`],
+    );
+    const totalRows = countRows[0].count;
     const totalPage = Math.ceil(totalRows / limit);
-    const familyMembers = await prisma.familyMember.findMany({
-      where: {
-        fullName: {
-          contains: search,
-        },
-      },
-      skip: offset,
-      take: limit,
-      orderBy: {
-        id: "asc",
-      },
-    });
+
+    const [rows] = await pool.query(
+      "SELECT * FROM family_members WHERE fullName LIKE ? ORDER BY id ASC LIMIT ? OFFSET ?",
+      [`%${search}%`, limit, offset],
+    );
+
+    const familyMembers = rows.map((row) => ({
+      ...row,
+      isCompleted: !!row.isCompleted,
+    }));
+
     return successResponse(
       res,
       { totalRows, totalPage, page, limit, familyMembers },
@@ -219,107 +236,61 @@ export const getParentsByFamilyMemberId = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const familyMember = await prisma.familyMember.findUnique({
-      where: { id },
-      select: { familyId: true },
-    });
+    const [familyMemberRows] = await pool.query(
+      "SELECT familyId FROM family_members WHERE id = ?",
+      [id],
+    );
+    const familyMember = familyMemberRows[0];
 
     if (!familyMember)
       return errorResponse(res, null, "Family member not found");
 
-    const parents = await prisma.familyMember.findMany({
-      where: {
-        familyId: familyMember.familyId,
-        OR: [{ relation: "AYAH" }, { relation: "IBU" }],
+    const [rows] = await pool.query(
+      `SELECT
+         fm.id AS fm_id, fm.fullName AS fm_fullName, fm.birthDate AS fm_birthDate,
+         fm.age AS fm_age, fm.education AS fm_education, fm.phone AS fm_phone,
+         job.id AS job_id,
+         jobType.id AS jobType_id, jobType.name AS jobType_name,
+         se.id AS se_id, se.residenceStatus AS se_residenceStatus, se.address AS se_address,
+         se.childrenCount AS se_childrenCount, se.underFiveCount AS se_underFiveCount,
+         se.familyIncomeLevel AS se_familyIncomeLevel
+       FROM family_members fm
+       LEFT JOIN jobs job ON job.id = fm.jobId
+       LEFT JOIN job_types jobType ON jobType.id = job.jobTypeId
+       JOIN socio_economic se ON se.id = fm.socioEconomicId
+       WHERE fm.familyId = ? AND (fm.relation = 'AYAH' OR fm.relation = 'IBU')`,
+      [familyMember.familyId],
+    );
+
+    const parents = rows.map((row) => ({
+      id: row.fm_id,
+      fullName: row.fm_fullName,
+      birthDate: row.fm_birthDate,
+      age: row.fm_age,
+      education: row.fm_education,
+      phone: row.fm_phone,
+      job: row.job_id
+        ? {
+            id: row.job_id,
+            jobType: row.jobType_id
+              ? { id: row.jobType_id, name: row.jobType_name }
+              : null,
+          }
+        : null,
+      SocioEconomic: {
+        id: row.se_id,
+        residenceStatus: row.se_residenceStatus,
+        address: row.se_address,
+        childrenCount: row.se_childrenCount,
+        underFiveCount: row.se_underFiveCount,
+        familyIncomeLevel: row.se_familyIncomeLevel,
       },
-      select: {
-        id: true,
-        fullName: true,
-        birthDate: true,
-        age: true,
-        education: true,
-        phone: true,
-        job: {
-          select: {
-            id: true,
-            jobType: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-          },
-        },
-        SocioEconomic: {
-          select: {
-            id: true,
-            residenceStatus: true,
-            address: true,
-            childrenCount: true,
-            underFiveCount: true,
-            familyIncomeLevel: true,
-          },
-        },
-      },
-    });
+    }));
 
     return successResponse(res, parents, "Parents retrieved successfully");
   } catch (error) {
     return errorResponse(res, error, "Failed to retrieve parents");
   }
-
-  // try {
-  //   const anak = await prisma.familyMember.findFirst({
-  //     where: {
-  //       id,
-  //     },
-  //   });
-
-  //   if (!anak) {
-  //     return errorResponse(res, null, "Anak tidak ditemukan");
-  //   }
-
-  //   const familyId = anak.familyId;
-
-  //   const orangTua = await prisma.familyMember.findMany({
-  //     where: {
-  //       familyId: familyId,
-  //       relation: { in: ["AYAH", "IBU"] },
-  //     },
-  //     select: {
-  //       id: true,
-  //       fullName: true,
-  //       birthDate: true,
-  //       gender: true,
-  //       relation: true,
-  //       phone: true,
-  //       education: true,
-  //       job: {
-  //         select: {
-  //           id: true,
-  //           income: true,
-  //           jobType: {
-  //             select: {
-  //               id: true,
-  //               name: true,
-  //             },
-  //           },
-  //         },
-  //       },
-  //       residence: {
-  //         select: {
-  //           id: true,
-  //           status: true,
-  //           address: true,
-  //         },
-  //       },
-  //     },
-  //   });
-
-  //   return successResponse(res, orangTua, "Parent data successfully retrieved");
-  // } catch (error) {
-  //   return errorResponse(res, error, "Failed to retrieve family member");
-  // }
 };
 
 export const createFamilyMember = async (req, res) => {
@@ -413,7 +384,7 @@ export const createFamilyMember = async (req, res) => {
             where: { id: existingFamilyMember.id },
             data: {
               fullName,
-              age: age ? parseInt(age) : null,
+              age: age ? Number.parseInt(age) : null,
               education,
               relation,
               familyId: familyByUser.id,
@@ -427,7 +398,7 @@ export const createFamilyMember = async (req, res) => {
           familyMember = await prisma.familyMember.create({
             data: {
               fullName,
-              age: age ? parseInt(age) : null,
+              age: age ? Number.parseInt(age) : null,
               education,
               relation,
               familyId: familyByUser.id,
@@ -493,7 +464,7 @@ export const createFamilyMember = async (req, res) => {
             where: { id: existingFamilyMember.id },
             data: {
               fullName,
-              age: age ? parseInt(age) : null,
+              age: age ? Number.parseInt(age) : null,
               education,
               relation,
               familyId: familyByUser.id,
@@ -507,7 +478,7 @@ export const createFamilyMember = async (req, res) => {
           familyMember = await prisma.familyMember.create({
             data: {
               fullName,
-              age: age ? parseInt(age) : null,
+              age: age ? Number.parseInt(age) : null,
               education,
               relation,
               familyId: familyByUser.id,
