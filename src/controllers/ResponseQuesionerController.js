@@ -283,41 +283,47 @@ export const checkAnsweredQuesioner = async (req, res) => {
 export const updateResponseQuesioner = async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const { option_id, boolean_value, scaleValue, score } =
-      req.body;
+    const { option_id, boolean_value, scaleValue, score } = req.body;
 
-    const updateResponse = await prisma.answer.update({
-      where: {
-        id,
-      },
-      data: {
-        option_id: Number(option_id),
-        boolean_value:
-          boolean_value === undefined || boolean_value === null
-            ? null
-            : Boolean(boolean_value),
-        scaleValue: Number(scaleValue),
-        score: Number(score),
-      },
-    });
+    const coercedBooleanValue =
+      boolean_value === undefined || boolean_value === null
+        ? null
+        : Boolean(boolean_value);
 
-    const answer = await prisma.answer.findFirst({
-      where: { id },
-    });
+    const [updateResult] = await pool.query(
+      "UPDATE answers SET option_id = ?, boolean_value = ?, scaleValue = ?, score = ? WHERE id = ?",
+      [Number(option_id), coercedBooleanValue, Number(scaleValue), Number(score), id]
+    );
 
-    const totalScore = await prisma.answer.aggregate({
-      where: {
-        responseId: answer.responseId,
-      },
-      _sum: { score: true },
-    });
+    if (updateResult.affectedRows === 0) {
+      throw new Error("Record to update not found.");
+    }
 
-    await prisma.response.update({
-      where: { id: answer.responseId },
-      data: { totalScore: totalScore._sum.score || 0 },
-    });
+    const [updatedRows] = await pool.query(
+      "SELECT * FROM answers WHERE id = ? LIMIT 1",
+      [id]
+    );
+    const updatedAnswerRow = updatedRows[0];
+    const updatedAnswer = {
+      ...updatedAnswerRow,
+      boolean_value:
+        updatedAnswerRow.boolean_value === null
+          ? null
+          : !!updatedAnswerRow.boolean_value,
+    };
 
-    return successResponse(res, updateResponse, "Berhasil mengupdate jawaban");
+    const [sumResult] = await pool.query(
+      "SELECT SUM(score) AS total FROM answers WHERE responseId = ?",
+      [updatedAnswer.responseId]
+    );
+    const totalScore = sumResult[0].total || 0;
+
+    await pool.query("UPDATE responses SET totalScore = ? WHERE id = ?", [
+      totalScore,
+      updatedAnswer.responseId,
+    ]);
+
+    return successResponse(res, updatedAnswer, "Berhasil mengupdate jawaban");
   } catch (error) {
     return errorResponse(res, error, "Failed to update response");
   }

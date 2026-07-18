@@ -12,6 +12,7 @@ import {
   getResponseQuesioner,
   createResponseQuesioner,
   checkAnsweredQuesioner,
+  updateResponseQuesioner,
 } from "../ResponseQuesionerController.js";
 
 function mockRes() {
@@ -435,5 +436,167 @@ describe("checkAnsweredQuesioner", () => {
       message: "Failed to check answered status",
       error: "Connection lost",
     });
+  });
+});
+
+describe("updateResponseQuesioner", () => {
+  it("updates the answer, recomputes totalScore, and returns the boolean-coerced row", async () => {
+    const req = {
+      params: { id: "1000" },
+      body: { option_id: 100, boolean_value: true, scaleValue: 2, score: 3 },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // UPDATE answers
+      .mockResolvedValueOnce([
+        [
+          {
+            id: 1000,
+            questionId: 10,
+            responseId: "resp-1",
+            option_id: 100,
+            score: 3,
+            boolean_value: 1,
+            scaleValue: 2,
+          },
+        ],
+        [],
+      ]) // re-select
+      .mockResolvedValueOnce([[{ total: 7 }], []]) // SUM
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE responses totalScore
+
+    await updateResponseQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("UPDATE answers SET"),
+      [100, true, 2, 3, 1000]
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("SUM(score)"),
+      ["resp-1"]
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining("UPDATE responses SET totalScore"),
+      [7, "resp-1"]
+    );
+
+    const payload = res.json.mock.calls[0][0];
+    expect(payload.data.boolean_value).toBe(true);
+    expect(payload.status).toBe("success");
+  });
+
+  it("throws and returns 500 when the target answer row does not exist (affectedRows === 0)", async () => {
+    const req = {
+      params: { id: "9999" },
+      body: { option_id: 100, boolean_value: false, scaleValue: 1, score: 0 },
+    };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([{ affectedRows: 0 }]); // UPDATE answers, no match
+
+    await updateResponseQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1); // no re-select, no SUM, no second UPDATE
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "error",
+        message: "Failed to update response",
+      })
+    );
+  });
+
+  it("returns 500 via the catch block when pool.query rejects unexpectedly", async () => {
+    const req = {
+      params: { id: "1000" },
+      body: { option_id: 100, boolean_value: true, scaleValue: 2, score: 3 },
+    };
+    const res = mockRes();
+
+    pool.query.mockRejectedValueOnce(new Error("Connection lost"));
+
+    await updateResponseQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Failed to update response",
+      error: "Connection lost",
+    });
+  });
+
+  it("guards SUM(score) returning null with || 0 when the response has no other answers", async () => {
+    const req = {
+      params: { id: "1000" },
+      body: { option_id: 100, boolean_value: null, scaleValue: null, score: 0 },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([{ affectedRows: 1 }])
+      .mockResolvedValueOnce([
+        [
+          {
+            id: 1000,
+            questionId: 10,
+            responseId: "resp-1",
+            option_id: 100,
+            score: 0,
+            boolean_value: null,
+            scaleValue: null,
+          },
+        ],
+        [],
+      ])
+      .mockResolvedValueOnce([[{ total: null }], []]) // SUM with no rows -> null
+      .mockResolvedValueOnce([{ affectedRows: 1 }]);
+
+    await updateResponseQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining("UPDATE responses SET totalScore"),
+      [0, "resp-1"]
+    );
+  });
+
+  it("coerces an undefined boolean_value in the request body to null", async () => {
+    const req = {
+      params: { id: "1000" },
+      body: { option_id: 100, scaleValue: 1, score: 2 },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([{ affectedRows: 1 }])
+      .mockResolvedValueOnce([
+        [
+          {
+            id: 1000,
+            questionId: 10,
+            responseId: "resp-1",
+            option_id: 100,
+            score: 2,
+            boolean_value: null,
+            scaleValue: 1,
+          },
+        ],
+        [],
+      ])
+      .mockResolvedValueOnce([[{ total: 2 }], []])
+      .mockResolvedValueOnce([{ affectedRows: 1 }]);
+
+    await updateResponseQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("UPDATE answers SET"),
+      [100, null, 1, 2, 1000]
+    );
   });
 });
