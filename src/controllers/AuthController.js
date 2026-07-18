@@ -1,9 +1,8 @@
-import { PrismaClient } from "@prisma/client";
 import argon2 from "argon2";
 import jwt from "jsonwebtoken";
+import { randomUUID } from "node:crypto";
+import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
-
-const prisma = new PrismaClient();
 
 export const registerParent = async (req, res) => {
   const { username, email, password, role_id } = req.body;
@@ -11,35 +10,51 @@ export const registerParent = async (req, res) => {
   const hashPassword = await argon2.hash(password);
 
   try {
-    const existingUser = await prisma.user.findFirst({
-      where: {
-        OR: [{ username }, { email }],
-      },
-    });
+    const [existingRows] = await pool.query(
+      "SELECT id FROM users WHERE username = ? OR email = ? LIMIT 1",
+      [username, email]
+    );
 
-    if (existingUser) {
+    if (existingRows.length > 0) {
       return errorResponse(res, null, "Username atau email sudah digunakan");
     }
 
-    const [newParent] = await prisma.$transaction([
-      prisma.user.create({
-        data: {
-          username,
-          email,
-          password: hashPassword,
-          role_id: role_id,
-        },
-      }),
-      prisma.family.create({
-        data: {
-          user: {
-            connect: {
-              username: username,
-            },
-          },
-        },
-      }),
-    ]);
+    const userId = randomUUID();
+    const familyId = randomUUID();
+    const now = new Date();
+
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+
+      await connection.query(
+        "INSERT INTO users (id, username, email, password, role_id, refresh_token, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [userId, username, email, hashPassword, role_id, null, now, now]
+      );
+
+      await connection.query(
+        "INSERT INTO families (id, userId, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        [familyId, userId, now, now]
+      );
+
+      await connection.commit();
+    } catch (transactionError) {
+      await connection.rollback();
+      throw transactionError;
+    } finally {
+      connection.release();
+    }
+
+    const newParent = {
+      id: userId,
+      username,
+      email,
+      password: hashPassword,
+      role_id,
+      refresh_token: null,
+      created_at: now,
+      updated_at: now,
+    };
 
     return successResponse(res, newParent, "Berhasil membuat akun");
   } catch (error) {
@@ -65,83 +80,110 @@ export const registerInstitution = async (req, res) => {
   const hashPassword = await argon2.hash(password);
 
   try {
-    const existingUser = await prisma.user.findFirst({
-      where: {
-        OR: [{ username }, { email }],
-      },
-    });
+    const [existingUserRows] = await pool.query(
+      "SELECT id FROM users WHERE username = ? OR email = ? LIMIT 1",
+      [username, email]
+    );
 
-    if (existingUser)
+    if (existingUserRows.length > 0) {
       return errorResponse(res, null, "Username atau email sudah digunakan");
+    }
 
-    const existingInstitution = await prisma.institution.findFirst({
-      where: {
-        OR: [
-          { name: institutionName },
-          { email: institutionEmail },
-          { phone: institutionPhone },
-          // { address: institutionAddress },
-        ],
-      },
-    });
+    const [existingInstitutionRows] = await pool.query(
+      "SELECT id FROM institutions WHERE name = ? OR email = ? OR phone = ? LIMIT 1",
+      [institutionName, institutionEmail, institutionPhone]
+    );
 
-    if (existingInstitution)
+    if (existingInstitutionRows.length > 0) {
       return errorResponse(
         res,
         null,
         "Institusi ini sudah digunakan oleh akun lain"
       );
+    }
 
-    const newInstitution = await prisma.user.create({
-      data: {
-        username,
-        email,
-        password: hashPassword,
-        role_id,
-        institution: {
-          create: {
-            name: institutionName,
-            email: institutionEmail,
-            phone: institutionPhone,
-            address: institutionAddress,
-            province_id: institutionProvince,
-            city_id: institutionCity,
-            type: institutionType,
-          },
-        },
+    const userId = randomUUID();
+    const now = new Date();
+    const provinceId = Number(institutionProvince) || null;
+    const cityId = Number(institutionCity) || null;
+
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+
+      await connection.query(
+        "INSERT INTO users (id, username, email, password, role_id, refresh_token, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [userId, username, email, hashPassword, role_id, null, now, now]
+      );
+
+      await connection.query(
+        "INSERT INTO institutions (name, email, phone, address, province_id, city_id, type, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+          institutionName,
+          institutionEmail,
+          institutionPhone,
+          institutionAddress,
+          provinceId,
+          cityId,
+          institutionType,
+          userId,
+          now,
+          now,
+        ]
+      );
+
+      await connection.commit();
+    } catch (transactionError) {
+      await connection.rollback();
+      throw transactionError;
+    } finally {
+      connection.release();
+    }
+
+    const [rows] = await pool.query(
+      `SELECT
+         u.id AS id,
+         u.username AS username,
+         u.email AS email,
+         r.name AS role_name,
+         i.id AS institution_id,
+         i.name AS institution_name,
+         i.email AS institution_email,
+         i.phone AS institution_phone,
+         i.address AS institution_address,
+         p.id AS province_id,
+         p.name AS province_name,
+         c.id AS city_id,
+         c.name AS city_name
+       FROM users u
+       JOIN roles r ON r.id = u.role_id
+       JOIN institutions i ON i.user_id = u.id
+       LEFT JOIN provinces p ON p.id = i.province_id
+       LEFT JOIN cities c ON c.id = i.city_id
+       WHERE u.id = ?
+       LIMIT 1`,
+      [userId]
+    );
+
+    const row = rows[0];
+    const newInstitution = {
+      id: row.id,
+      username: row.username,
+      email: row.email,
+      role: { name: row.role_name },
+      institution: {
+        id: row.institution_id,
+        name: row.institution_name,
+        email: row.institution_email,
+        phone: row.institution_phone,
+        address: row.institution_address,
+        province: row.province_id
+          ? { id: row.province_id, name: row.province_name }
+          : null,
+        city: row.city_id ? { id: row.city_id, name: row.city_name } : null,
       },
-      select: {
-        id: true,
-        username: true,
-        email: true,
-        role: {
-          select: {
-            name: true,
-          },
-        },
-        institution: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            phone: true,
-            address: true,
-            province: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-            city: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-          },
-        },
-      },
-    });
+    };
+
     return successResponse(res, newInstitution, "Berhasil membuat akun");
   } catch (error) {
     return errorResponse(res, error, "Error saat membuat akun");
@@ -150,27 +192,26 @@ export const registerInstitution = async (req, res) => {
 
 export const login = async (req, res) => {
   try {
-    const user = await prisma.user.findFirst({
-      where: {
-        OR: [{ username: req.body.identifier }, { email: req.body.identifier }],
-      },
-      include: {
-        role: {
-          select: {
-            name: true,
-          },
-        },
-      },
-    });
+    const [rows] = await pool.query(
+      `SELECT u.id, u.username, u.email, u.password, u.role_id, u.refresh_token, u.created_at, u.updated_at, r.name AS role_name
+       FROM users u
+       JOIN roles r ON r.id = u.role_id
+       WHERE u.username = ? OR u.email = ?
+       LIMIT 1`,
+      [req.body.identifier, req.body.identifier]
+    );
 
-    if (!user) {
+    if (rows.length === 0) {
       return errorResponse(res, null, "User tidak ditemukan");
     }
 
+    const user = rows[0];
+
     const match = await argon2.verify(user.password, req.body.password);
     if (!match) return errorResponse(res, null, "Password salah");
-    const { id, username, email, role } = user;
-    const roleName = role.name;
+
+    const { id, username, email } = user;
+    const roleName = user.role_name;
 
     const accessToken = jwt.sign(
       { id, username, email, role: roleName },
@@ -186,14 +227,12 @@ export const login = async (req, res) => {
         expiresIn: "1d",
       }
     );
-    await prisma.user.update({
-      data: {
-        refresh_token: refreshToken,
-      },
-      where: {
-        id,
-      },
-    });
+
+    await pool.query("UPDATE users SET refresh_token = ? WHERE id = ?", [
+      refreshToken,
+      id,
+    ]);
+
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
       maxAge: 24 * 60 * 60 * 1000,
@@ -210,28 +249,23 @@ export const logout = async (req, res) => {
   const refreshToken = req.cookies.refreshToken;
   if (!refreshToken)
     return errorResponse(res, null, "Refresh token tidak ditemukan");
-  const user = await prisma.user.findFirst({
-    where: {
-      refresh_token: refreshToken,
-    },
-    include: {
-      role: {
-        select: {
-          name: true,
-        },
-      },
-    },
+
+  const [rows] = await pool.query(
+    "SELECT id FROM users WHERE refresh_token = ? LIMIT 1",
+    [refreshToken]
+  );
+
+  if (rows.length === 0)
+    return errorResponse(res, null, "Refresh token tidak valid");
+
+  const { id } = rows[0];
+
+  await pool.query("UPDATE users SET refresh_token = NULL WHERE id = ?", [id]);
+
+  res.clearCookie("refreshToken", {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
   });
-  if (!user) return errorResponse(res, null, "Refresh token tidak valid");
-  const { id } = user;
-  await prisma.user.update({
-    where: {
-      id,
-    },
-    data: {
-      refresh_token: null,
-    },
-  });
-  res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "none" });
   return successResponse(res, null, "Logout berhasil");
 };
