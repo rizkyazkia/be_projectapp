@@ -17,7 +17,6 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@prisma/client": "^6.8.2",
     "argon2": "^0.43.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
@@ -26,8 +25,7 @@
     "joi": "^17.13.3",
     "jsonwebtoken": "^9.0.2",
     "mysql2": "^3.14.0",
-    "nodemon": "^3.1.10",
-    "prisma": "^6.8.2"
+    "nodemon": "^3.1.10"
   },
   "devDependencies": {
     "vitest": "^4.1.10"
