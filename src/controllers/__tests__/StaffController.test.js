@@ -393,11 +393,12 @@ describe("updateStafff", () => {
 
     await updateStafff(req, res);
 
+    expect(pool.getConnection).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(500);
     expect(res.json).toHaveBeenCalledWith({
       status: "error",
       message: "Gagal Mengubah staff",
-      error: expect.any(String),
+      error: expect.stringContaining("user_id"),
     });
   });
 
