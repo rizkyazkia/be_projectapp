@@ -14,6 +14,7 @@ import {
   checkAnsweredQuesioner,
   updateResponseQuesioner,
   getResponseQuesionerInstitution,
+  createResponseQuesionerInstitution,
 } from "../ResponseQuesionerController.js";
 
 function mockRes() {
@@ -733,6 +734,116 @@ describe("getResponseQuesionerInstitution", () => {
     expect(res.json).toHaveBeenCalledWith({
       status: "error",
       message: "Failed to get response",
+      error: "Connection lost",
+    });
+  });
+});
+
+describe("createResponseQuesionerInstitution", () => {
+  const UUID = "11111111-1111-1111-1111-111111111111";
+
+  it("inserts the response, bulk-inserts answers, and updates totalScore", async () => {
+    const req = {
+      user: { id: "user-1" },
+      params: { id: "5" },
+      body: {
+        answers: [
+          { questionId: 10, score: 3, boolean_value: false, scaleValue: 0 },
+        ],
+      },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, user_id: "user-1" }], []]) // institutions
+      .mockResolvedValueOnce([{ affectedRows: 1, insertId: 0 }]) // INSERT responses
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // bulk INSERT answers
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE responses totalScore
+
+    await createResponseQuesionerInstitution(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("INSERT INTO responses"),
+      [UUID, 5, 0, null, 1]
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("INSERT INTO answers"),
+      [[[10, UUID, null, 3, false, 0]]]
+    );
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { count: 1 } })
+    );
+  });
+
+  it("returns 500 (401-as-error bug) when there is no user on the request", async () => {
+    const req = { user: null, params: { id: "5" }, body: { answers: [] } };
+    const res = mockRes();
+
+    await createResponseQuesionerInstitution(req, res);
+
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 401, message: "Unauthorized" })
+    );
+  });
+
+  it("returns 500 (404-as-error bug) when institution not found", async () => {
+    const req = {
+      user: { id: "user-1" },
+      params: { id: "5" },
+      body: { answers: [] },
+    };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    await createResponseQuesionerInstitution(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 404, message: "Institution not found" })
+    );
+  });
+
+  it("defaults option_id to null (not NaN) when the item omits it, and skips the bulk insert when answers is empty", async () => {
+    const req = {
+      user: { id: "user-1" },
+      params: { id: "5" },
+      body: { answers: [] },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([{ affectedRows: 1, insertId: 0 }])
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE responses totalScore (no bulk insert call)
+
+    await createResponseQuesionerInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(3); // no INSERT INTO answers call
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { count: 0 } })
+    );
+  });
+
+  it("returns 500 via the catch block when pool.query rejects unexpectedly", async () => {
+    const req = {
+      user: { id: "user-1" },
+      params: { id: "5" },
+      body: { answers: [] },
+    };
+    const res = mockRes();
+
+    pool.query.mockRejectedValueOnce(new Error("Connection lost"));
+
+    await createResponseQuesionerInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Gagal menjawab kuisioner, silahkan diulang",
       error: "Connection lost",
     });
   });

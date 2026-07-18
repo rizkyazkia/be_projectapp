@@ -437,27 +437,27 @@ export const createResponseQuesionerInstitution = async (req, res) => {
     }
 
     // Cari institution milik user
-    const institution = await prisma.institution.findFirst({
-      where: { user_id: user.id },
-    });
+    const [institutions] = await pool.query(
+      "SELECT * FROM institutions WHERE user_id = ? LIMIT 1",
+      [user.id]
+    );
+    const institution = institutions[0];
 
     if (!institution) {
       return errorResponse(res, 404, "Institution not found");
     }
 
     // Buat response baru untuk institution
-    const responseRecord = await prisma.response.create({
-      data: {
-        quisionerId: Number(id),
-        totalScore: 0,
-        familyMemberId: null,
-        institutionId: institution.id,
-      },
-    });
+    const responseId = randomUUID();
+
+    await pool.query(
+      "INSERT INTO responses (id, quisionerId, created_at, totalScore, familyMemberId, institutionId) VALUES (?, ?, NOW(3), ?, ?, ?)",
+      [responseId, Number(id), 0, null, institution.id]
+    );
 
     const sanitizedData = answers.map((item) => ({
       questionId: Number(item.questionId),
-      responseId: responseRecord.id,
+      responseId,
       option_id: item.option_id !== undefined ? Number(item.option_id) : null,
       score: Number(item.score),
       boolean_value:
@@ -490,25 +490,38 @@ export const createResponseQuesionerInstitution = async (req, res) => {
       }
     }
 
-    const response = await prisma.answer.createMany({
-      data: sanitizedData,
-    });
+    let insertResult = { affectedRows: 0 };
+    if (sanitizedData.length > 0) {
+      const values = sanitizedData.map((item) => [
+        item.questionId,
+        item.responseId,
+        item.option_id,
+        item.score,
+        item.boolean_value,
+        item.scaleValue,
+      ]);
+      const [result] = await pool.query(
+        "INSERT INTO answers (questionId, responseId, option_id, score, boolean_value, scaleValue) VALUES ?",
+        [values]
+      );
+      insertResult = result;
+    }
 
     const HitungScore = sanitizedData.reduce(
       (sum, item) => sum + (item.score || 0),
       0
     );
 
-    await prisma.response.update({
-      where: {
-        id: responseRecord.id,
-      },
-      data: {
-        totalScore: HitungScore,
-      },
-    });
+    await pool.query("UPDATE responses SET totalScore = ? WHERE id = ?", [
+      HitungScore,
+      responseId,
+    ]);
 
-    return successResponse(res, response, "Berhasil menjawab kuisioner");
+    return successResponse(
+      res,
+      { count: insertResult.affectedRows },
+      "Berhasil menjawab kuisioner"
+    );
   } catch (error) {
     return errorResponse(
       res,
