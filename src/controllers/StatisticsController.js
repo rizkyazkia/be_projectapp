@@ -1,7 +1,10 @@
-import { PrismaClient } from "@prisma/client";
+import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
 
-const prisma = new PrismaClient();
+// NOTE: mysql2 can return COUNT(*)/COUNT(id) results as a JS number or as a
+// string representation of a BIGINT, depending on driver/row configuration.
+// Every count in this file is wrapped in Number(...) before arithmetic or
+// comparison to avoid string-concatenation bugs ("12" + 1 !== 13).
 
 const POINTS_RESIDENCE = {
   MILIK_SENDIRI: 3,
@@ -43,103 +46,146 @@ const QUESTIONNAIRE_THRESHOLDS = {
 
 export const getAdminDashboardSummary = async (req, res) => {
   try {
-    const adminRole = await prisma.role.findUnique({
-      where: { name: "admin" },
-    });
-    const adminRoleId = adminRole?.id ?? -1;
+    // 1. admin role lookup
+    const [adminRoleRows] = await pool.query(
+      `SELECT id FROM roles WHERE name = ? LIMIT 1`,
+      ["admin"],
+    );
+    const adminRoleId = adminRoleRows[0]?.id ?? -1;
 
-    const totalUsers = await prisma.user.count({
-      where: { role_id: { not: adminRoleId } },
-    });
+    // 2. totalUsers excluding admin
+    const [totalUsersRows] = await pool.query(
+      `SELECT COUNT(id) AS count FROM users WHERE role_id != ?`,
+      [adminRoleId],
+    );
+    const totalUsers = Number(totalUsersRows[0].count);
 
-    const usersByRole = await prisma.user.groupBy({
-      by: ["role_id"],
-      _count: { id: true },
-    });
-    const roles = await prisma.role.findMany();
+    // 3+4. usersByRole groupBy (no zero-fill) + roles list for labeling
+    const [usersByRoleRows] = await pool.query(
+      `SELECT role_id, COUNT(id) AS count FROM users GROUP BY role_id`,
+    );
+    const [roleRows] = await pool.query(`SELECT id, name FROM roles`);
     const roleMap = {};
-    roles.forEach((r) => {
+    roleRows.forEach((r) => {
       roleMap[r.id] = r.name;
     });
-    const userByRole = usersByRole
+    const userByRole = usersByRoleRows
       .filter((u) => u.role_id !== adminRoleId)
-      .map((u) => ({ role: roleMap[u.role_id], total: u._count.id }));
+      .map((u) => ({ role: roleMap[u.role_id], total: Number(u.count) }));
 
-    const totalInstitutions = await prisma.institution.count();
+    // 5. totalInstitutions
+    const [totalInstitutionsRows] = await pool.query(
+      `SELECT COUNT(id) AS count FROM institutions`,
+    );
+    const totalInstitutions = Number(totalInstitutionsRows[0].count);
 
-    const instByType = await prisma.institution.groupBy({
-      by: ["type"],
-      _count: { id: true },
-    });
-    const instTypes = await prisma.institutionType.findMany();
+    // 6+7. instByType groupBy (no zero-fill) + institution_types list for labeling
+    const [instByTypeRows] = await pool.query(
+      `SELECT type, COUNT(id) AS count FROM institutions GROUP BY type`,
+    );
+    const [instTypeRows] = await pool.query(
+      `SELECT id, name FROM institution_types`,
+    );
     const instTypeMap = {};
-    instTypes.forEach((t) => {
+    instTypeRows.forEach((t) => {
       instTypeMap[t.id] = t.name;
     });
-    const institutionByType = instByType.map((i) => ({
+    const institutionByType = instByTypeRows.map((i) => ({
       type: instTypeMap[i.type],
-      total: i._count.id,
+      total: Number(i.count),
     }));
 
-    const familyMembers = await prisma.familyMember.findMany({
-      select: {
-        nutrition: {
-          select: { nutritionStatus: { select: { displayName: true } } },
-          orderBy: { updatedAt: "desc" },
-          take: 1,
-        },
-      },
-    });
+    // 8. true-latest nutrition status per family member (ALL members, not scoped
+    // to any family). Correlated subquery is used instead of ROW_NUMBER() OVER()
+    // for compatibility with MariaDB/MySQL versions that predate window function
+    // support; if the target server is confirmed MySQL 8+/MariaDB 10.2+, this can
+    // be swapped for a ROW_NUMBER() OVER (PARTITION BY familyMemberId ORDER BY
+    // updatedAt DESC) = 1 filter with identical results.
+    const [nutritionRows] = await pool.query(
+      `SELECT fm.id, ns.displayName
+       FROM family_members fm
+       LEFT JOIN nutritions n
+         ON n.familyMemberId = fm.id
+         AND n.updatedAt = (
+           SELECT MAX(n2.updatedAt) FROM nutritions n2 WHERE n2.familyMemberId = fm.id
+         )
+       LEFT JOIN nutrition_status ns ON ns.id = n.nutritionStatusId`,
+      [],
+    );
     const nutritionMap = {};
-    familyMembers.forEach((fm) => {
-      const name =
-        fm.nutrition?.[0]?.nutritionStatus?.displayName || "Tidak Terdata";
+    nutritionRows.forEach((fm) => {
+      const name = fm.displayName || "Tidak Terdata";
       nutritionMap[name] = (nutritionMap[name] || 0) + 1;
     });
     const nutritionDistribution = Object.entries(nutritionMap).map(
       ([displayName, total]) => ({ displayName, total }),
     );
 
-    const totalTeachers = await prisma.teacher.count();
-    const totalClasses = await prisma.class.count();
-    const totalRecommendations = await prisma.recommendation.count();
+    // 9-11. simple counts, run in parallel (independent of each other)
+    const [teacherRows, classRows, recommendationRows] = await Promise.all([
+      pool.query(`SELECT COUNT(id) AS count FROM teachers`),
+      pool.query(`SELECT COUNT(id) AS count FROM classes`),
+      pool.query(`SELECT COUNT(id) AS count FROM recommendations`),
+    ]);
+    const totalTeachers = Number(teacherRows[0][0].count);
+    const totalClasses = Number(classRows[0][0].count);
+    const totalRecommendations = Number(recommendationRows[0][0].count);
 
-    const recByStatus = await prisma.recommendation.groupBy({
-      by: ["status"],
-      _count: { id: true },
-    });
+    // 12. recByStatus groupBy — NO zero-fill (contrast with healthcare dashboard,
+    // which fixed-array zero-fills all 3 statuses; do not unify these)
+    const [recByStatusRows] = await pool.query(
+      `SELECT status, COUNT(id) AS count FROM recommendations GROUP BY status`,
+    );
     const statusLabelMap = {
       PENDING: "pending",
       PROCESSED: "proses",
       COMPLETED: "selesai",
     };
-    const recommendationsByStatus = recByStatus.map((r) => ({
+    const recommendationsByStatus = recByStatusRows.map((r) => ({
       status: statusLabelMap[r.status] || r.status.toLowerCase(),
-      total: r._count.id,
+      total: Number(r.count),
     }));
 
-    const schoolQuesioner = await prisma.quesioner.findFirst({
-      where: { title: "Pelayanan Kesehatan Sekolah" },
-    });
+    // 13. schoolQuesioner lookup
+    const [schoolQuesionerRows] = await pool.query(
+      `SELECT id, title FROM quesioners WHERE title = ? LIMIT 1`,
+      ["Pelayanan Kesehatan Sekolah"],
+    );
+    const schoolQuesioner = schoolQuesionerRows[0] ?? null;
 
-    const schools = await prisma.institution.findMany({
-      where: { institution_type: { name: "School" } },
-      select: { id: true, name: true },
-    });
+    // 14. schools list
+    const [schools] = await pool.query(
+      `SELECT i.id, i.name
+       FROM institutions i
+       INNER JOIN institution_types it ON it.id = i.type
+       WHERE it.name = ?`,
+      ["School"],
+    );
 
-    const schoolResponses = await prisma.response.groupBy({
-      by: ["institutionId"],
-      where: {
-        institutionId: { not: null },
-        quisionerId: schoolQuesioner?.id ?? undefined,
-      },
-      _count: { id: true },
-    });
+    // 15. schoolResponses groupBy. The quisionerId filter is added conditionally
+    // in JS — replicating Prisma's "undefined drops the where key" semantics.
+    // Binding `schoolQuesioner?.id ?? null` into `= ?` would be WRONG: SQL
+    // `= NULL` is always unknown/false, so it would silently return zero groups
+    // instead of "count every response" when the questionnaire is missing.
+    let schoolResponsesSql = `SELECT institutionId, COUNT(id) AS count FROM responses WHERE institutionId IS NOT NULL`;
+    const schoolResponsesParams = [];
+    if (schoolQuesioner) {
+      schoolResponsesSql += ` AND quisionerId = ?`;
+      schoolResponsesParams.push(schoolQuesioner.id);
+    }
+    schoolResponsesSql += ` GROUP BY institutionId`;
+    const [schoolResponses] = await pool.query(
+      schoolResponsesSql,
+      schoolResponsesParams,
+    );
     const responseMap = {};
     schoolResponses.forEach((r) => {
-      if (r.institutionId) responseMap[r.institutionId] = r._count.id;
+      if (r.institutionId) responseMap[r.institutionId] = Number(r.count);
     });
 
+    // JS-side zero-fill: every school defaults to 0 completed quests. This is
+    // the REAL backfill in this handler — it happens here, in JS, over the
+    // independently-fetched `schools` list, not in SQL.
     const institutionDetails = schools.map((s) => ({
       id: s.id,
       name: s.name,
@@ -156,22 +202,24 @@ export const getAdminDashboardSummary = async (req, res) => {
         ? Math.round((completedInstitutions / totalSchoolInst) * 100)
         : 0;
 
-    const recentRecs = await prisma.recommendation.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 5,
-      include: {
-        student: {
-          include: {
-            familyMember: { select: { fullName: true } },
-            institution: { select: { name: true } },
-          },
-        },
-      },
-    });
+    // 16. recentRecs — student/familyMember/institution are all required
+    // (non-optional) relations in the schema, so INNER JOIN is safe here
+    // (mirrors Prisma's guarantee that `include` on a required relation never
+    // returns null).
+    const [recentRecs] = await pool.query(
+      `SELECT r.id, r.createdAt, r.status, fm.fullName AS studentName, i.name AS institutionName
+       FROM recommendations r
+       INNER JOIN students s ON s.id = r.studentId
+       INNER JOIN family_members fm ON fm.id = s.familyMemberId
+       INNER JOIN institutions i ON i.id = s.schoolId
+       ORDER BY r.createdAt DESC
+       LIMIT 5`,
+      [],
+    );
     const recentRecommendations = recentRecs.map((r) => ({
       id: r.id,
-      studentName: r.student.familyMember.fullName,
-      institutionName: r.student.institution.name,
+      studentName: r.studentName,
+      institutionName: r.institutionName,
       status: statusLabelMap[r.status] || r.status.toLowerCase(),
       createdAt: r.createdAt,
     }));
@@ -207,35 +255,115 @@ export const getParentDashboardSummary = async (req, res) => {
   try {
     const user = req.user;
 
-    const family = await prisma.family.findUnique({
-      where: { userId: user.id },
-      include: {
-        familyMember: {
-          include: {
-            nutrition: {
-              include: { nutritionStatus: true },
-              orderBy: { updatedAt: "desc" },
-              take: 1,
-            },
-            SocioEconomic: true,
-            student: true,
-          },
-        },
-      },
-    });
+    // 1. family lookup
+    const [familyRows] = await pool.query(
+      `SELECT id, userId FROM families WHERE userId = ? LIMIT 1`,
+      [user.id],
+    );
+    const family = familyRows[0] ?? null;
 
     if (!family) {
       return errorResponse(res, null, "Family not found");
     }
 
-    const members = family.familyMember;
-    const totalFamilyMembers = members.length;
-    const children = members.filter((m) => m.relation === "ANAK");
+    // 2. members — the base list this whole handler is composed around
+    const [members] = await pool.query(
+      `SELECT id, fullName, birthDate, age, education, jobId, gender, relation,
+              familyId, institutionId, phone, isCompleted, socioEconomicId,
+              createdAt, updatedAt
+       FROM family_members
+       WHERE familyId = ?`,
+      [family.id],
+    );
+
+    const memberIds = members.map((m) => m.id);
+
+    // 3. true-latest nutrition per member, scoped to this family's members only
+    // (same true-latest pattern as the admin dashboard's ALL-members version —
+    // correlated subquery, not ROW_NUMBER(), for MariaDB/older-MySQL compat).
+    // Guarded: an empty IN (?) is invalid SQL, so skip the query entirely when
+    // there are no members.
+    let nutritionRows = [];
+    if (memberIds.length > 0) {
+      [nutritionRows] = await pool.query(
+        `SELECT n.familyMemberId, n.id, n.height, n.weight, n.bmi, n.updatedAt, ns.displayName
+         FROM nutritions n
+         LEFT JOIN nutrition_status ns ON ns.id = n.nutritionStatusId
+         WHERE n.familyMemberId IN (?)
+           AND n.updatedAt = (
+             SELECT MAX(n2.updatedAt) FROM nutritions n2 WHERE n2.familyMemberId = n.familyMemberId
+           )`,
+        [memberIds],
+      );
+    }
+    const nutritionByMember = {};
+    nutritionRows.forEach((n) => {
+      nutritionByMember[n.familyMemberId] = n;
+    });
+
+    // 4. students keyed by familyMemberId
+    let studentRows = [];
+    if (memberIds.length > 0) {
+      [studentRows] = await pool.query(
+        `SELECT id, schoolId, familyMemberId, nis, schoolYear, semester, classId
+         FROM students
+         WHERE familyMemberId IN (?)`,
+        [memberIds],
+      );
+    }
+    const studentByMember = {};
+    studentRows.forEach((s) => {
+      studentByMember[s.familyMemberId] = s;
+    });
+
+    // 5. socio_economic keyed by id (distinct ids, guarded)
+    const socioEconomicIds = [...new Set(members.map((m) => m.socioEconomicId))];
+    let socioRows = [];
+    if (socioEconomicIds.length > 0) {
+      [socioRows] = await pool.query(
+        `SELECT id, residenceStatus, address, childrenCount, underFiveCount,
+                familyIncomeLevel, createdAt, updatedAt
+         FROM socio_economic
+         WHERE id IN (?)`,
+        [socioEconomicIds],
+      );
+    }
+    const socioById = {};
+    socioRows.forEach((se) => {
+      socioById[se.id] = se;
+    });
+
+    // Compose the in-memory shape the (unchanged) pure-JS logic below expects,
+    // matching Prisma's nested include shape.
+    const familyMembers = members.map((m) => {
+      const n = nutritionByMember[m.id];
+      return {
+        ...m,
+        nutrition: n
+          ? [
+              {
+                id: n.id,
+                height: n.height,
+                weight: n.weight,
+                bmi: n.bmi,
+                updatedAt: n.updatedAt,
+                nutritionStatus:
+                  n.displayName != null ? { displayName: n.displayName } : null,
+              },
+            ]
+          : [],
+        SocioEconomic: socioById[m.socioEconomicId] ?? null,
+        student: studentByMember[m.id] ?? null,
+      };
+    });
+
+    const totalFamilyMembers = familyMembers.length;
+    const children = familyMembers.filter((m) => m.relation === "ANAK");
     const totalChildren = children.length;
 
     const parent =
-      members.find((m) => m.relation === "IBU") ||
-      members.find((m) => m.relation === "AYAH");
+      familyMembers.find((m) => m.relation === "IBU") ||
+      familyMembers.find((m) => m.relation === "AYAH");
 
     let totalQuestionnaires = 0;
     let answeredQuestionnaires = 0;
@@ -248,14 +376,25 @@ export const getParentDashboardSummary = async (req, res) => {
     ];
 
     if (parent) {
-      totalQuestionnaires = await prisma.quesioner.count({
-        where: { title: { in: parentTitles } },
-      });
+      // 6. totalQuestionnaires
+      const [totalQuestionnairesRows] = await pool.query(
+        `SELECT COUNT(id) AS count FROM quesioners WHERE title IN (?)`,
+        [parentTitles],
+      );
+      totalQuestionnaires = Number(totalQuestionnairesRows[0].count);
 
-      const parentResponses = await prisma.response.findMany({
-        where: { familyMemberId: parent.id },
-        include: { quesioner: true },
-      });
+      // 7. parentResponses — INNER JOIN quesioners (required relation).
+      // NOTE: `r.quisionerId` (the flat column) is read directly below rather
+      // than a nested quesioner.id — this is the original behavior, not a typo,
+      // and must be preserved as-is.
+      const [parentResponses] = await pool.query(
+        `SELECT r.id, r.quisionerId, r.totalScore, r.familyMemberId, r.institutionId,
+                r.created_at, q.title AS quesionerTitle
+         FROM responses r
+         INNER JOIN quesioners q ON q.id = r.quisionerId
+         WHERE r.familyMemberId = ?`,
+        [parent.id],
+      );
 
       answeredQuestionnaires = parentResponses.length;
       questionnaireProgress =
@@ -264,11 +403,11 @@ export const getParentDashboardSummary = async (req, res) => {
           : 0;
 
       for (const r of parentResponses) {
-        const threshold = QUESTIONNAIRE_THRESHOLDS[r.quesioner.title];
+        const threshold = QUESTIONNAIRE_THRESHOLDS[r.quesionerTitle];
         if (threshold) {
           questionnaireResults.push({
             quesionerId: r.quisionerId,
-            title: r.quesioner.title,
+            title: r.quesionerTitle,
             totalScore: r.totalScore,
             interpretation:
               r.totalScore >= threshold.min ? threshold.good : threshold.bad,
@@ -303,8 +442,8 @@ export const getParentDashboardSummary = async (req, res) => {
     }
 
     const parentEducation = {};
-    const ibu = members.find((m) => m.relation === "IBU");
-    const ayah = members.find((m) => m.relation === "AYAH");
+    const ibu = familyMembers.find((m) => m.relation === "IBU");
+    const ayah = familyMembers.find((m) => m.relation === "AYAH");
     if (ibu)
       parentEducation.ibu = {
         education: ibu.education,
@@ -336,14 +475,23 @@ export const getParentDashboardSummary = async (req, res) => {
     const childWithSchool = children.find((c) => c.student?.schoolId);
     if (childWithSchool) {
       const schoolId = childWithSchool.student.schoolId;
-      const schoolQuesioner = await prisma.quesioner.findFirst({
-        where: { title: "Pelayanan Kesehatan Sekolah" },
-      });
+      // 8. schoolQuesioner lookup
+      const [schoolQuesionerRows] = await pool.query(
+        `SELECT id, title FROM quesioners WHERE title = ? LIMIT 1`,
+        ["Pelayanan Kesehatan Sekolah"],
+      );
+      const schoolQuesioner = schoolQuesionerRows[0] ?? null;
       if (schoolQuesioner) {
-        const schoolResponse = await prisma.response.findFirst({
-          where: { institutionId: schoolId, quisionerId: schoolQuesioner.id },
-          orderBy: { created_at: "desc" },
-        });
+        // 9. latest response for that school+questionnaire
+        const [schoolResponseRows] = await pool.query(
+          `SELECT id, quisionerId, totalScore, familyMemberId, institutionId, created_at
+           FROM responses
+           WHERE institutionId = ? AND quisionerId = ?
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [schoolId, schoolQuesioner.id],
+        );
+        const schoolResponse = schoolResponseRows[0] ?? null;
         if (schoolResponse) {
           const threshold = 17;
           schoolHealthService = {
@@ -383,72 +531,102 @@ export const getSchoolDashboardSummary = async (req, res) => {
   try {
     const user = req.user;
 
-    const institution = await prisma.institution.findUnique({
-      where: { user_id: user.id },
-    });
+    const [institutionRows] = await pool.query(
+      `SELECT id, user_id, name FROM institutions WHERE user_id = ? LIMIT 1`,
+      [user.id],
+    );
+    const institution = institutionRows[0] ?? null;
 
     if (!institution) return errorResponse(res, null, "Institution not found");
 
     const institutionId = institution.id;
 
-    const totalStudents = await prisma.student.count({
-      where: { schoolId: institutionId },
-    });
-    const totalClasses = await prisma.class.count({
-      where: { school_id: institutionId },
-    });
-    const totalTeachers = await prisma.teacher.count({
-      where: { school_id: institutionId },
-    });
-    const totalPartners = await prisma.partnership.count({
-      where: { schoolId: institutionId },
-    });
+    // NOTE the column-name inconsistency: students.schoolId and
+    // partnerships.schoolId are camelCase, but classes.school_id and
+    // teachers.school_id are snake_case. This mirrors the actual DB schema —
+    // do not "normalize" the casing, it would break these queries.
+    const [studentCountRows, classCountRows, teacherCountRows, partnerCountRows] =
+      await Promise.all([
+        pool.query(`SELECT COUNT(id) AS count FROM students WHERE schoolId = ?`, [
+          institutionId,
+        ]),
+        pool.query(`SELECT COUNT(id) AS count FROM classes WHERE school_id = ?`, [
+          institutionId,
+        ]),
+        pool.query(`SELECT COUNT(id) AS count FROM teachers WHERE school_id = ?`, [
+          institutionId,
+        ]),
+        pool.query(
+          `SELECT COUNT(id) AS count FROM partnerships WHERE schoolId = ?`,
+          [institutionId],
+        ),
+      ]);
+    const totalStudents = Number(studentCountRows[0][0].count);
+    const totalClasses = Number(classCountRows[0][0].count);
+    const totalTeachers = Number(teacherCountRows[0][0].count);
+    const totalPartners = Number(partnerCountRows[0][0].count);
 
-    const students = await prisma.familyMember.findMany({
-      where: { student: { schoolId: institutionId } },
-      select: {
-        nutrition: {
-          select: { nutritionStatus: { select: { displayName: true } } },
-        },
-      },
-    });
-
+    // Nutrition distribution — INTENTIONAL BUG-FOR-BUG REPRODUCTION. The
+    // original Prisma call has no orderBy/take on the nutrition relation, and
+    // the downstream JS reads array index [0] of an unsorted array — i.e. it
+    // reads whichever row the DB's default order happens to put first, NOT the
+    // true latest nutrition record. This is reproduced here by ordering
+    // (fm.id, n.id) ASC and taking the first nutrition row seen per member via
+    // a Set, NOT by ordering on updatedAt DESC like Task 34's two dashboards.
+    // Do not "fix" this to also be latest-first.
+    const [nutritionRows] = await pool.query(
+      `SELECT fm.id AS familyMemberId, n.id AS nutritionId, ns.displayName
+       FROM family_members fm
+       INNER JOIN students st ON st.familyMemberId = fm.id
+       LEFT JOIN nutritions n ON n.familyMemberId = fm.id
+       LEFT JOIN nutrition_status ns ON ns.id = n.nutritionStatusId
+       WHERE st.schoolId = ?
+       ORDER BY fm.id ASC, n.id ASC`,
+      [institutionId],
+    );
+    const seenMembers = new Set();
     const nutritionMap = {};
-    students.forEach((fm) => {
-      const name =
-        fm.nutrition?.[0]?.nutritionStatus?.displayName || "Tidak Terdata";
+    nutritionRows.forEach((row) => {
+      if (seenMembers.has(row.familyMemberId)) return;
+      seenMembers.add(row.familyMemberId);
+      const name = row.displayName || "Tidak Terdata";
       nutritionMap[name] = (nutritionMap[name] || 0) + 1;
     });
     const nutritionDistribution = Object.entries(nutritionMap).map(
       ([displayName, total]) => ({ displayName, total }),
     );
 
-    const classGroups = await prisma.student.groupBy({
-      by: ["classId"],
-      where: { schoolId: institutionId },
-      _count: { id: true },
-    });
+    // classGroups groupBy — no zero-fill
+    const [classGroups] = await pool.query(
+      `SELECT classId, COUNT(id) AS count FROM students WHERE schoolId = ? GROUP BY classId`,
+      [institutionId],
+    );
     const classIds = classGroups.map((g) => g.classId);
-    const classes = await prisma.class.findMany({
-      where: { id: { in: classIds } },
-      select: { id: true, name: true },
-    });
+    let classes = [];
+    if (classIds.length > 0) {
+      [classes] = await pool.query(
+        `SELECT id, name FROM classes WHERE id IN (?)`,
+        [classIds],
+      );
+    }
     const classMap = {};
     classes.forEach((c) => {
       classMap[c.id] = c.name;
     });
     const studentsPerClass = classGroups.map((g) => ({
       className: classMap[g.classId] || "Unknown",
-      total: g._count.id,
+      total: Number(g.count),
     }));
 
     const QUESTIONNAIRE_THRESHOLDS = {
       "Pelayanan Kesehatan Sekolah": { min: 17, good: "Tinggi", bad: "Rendah" },
     };
 
-    const quesioner = await prisma.quesioner.findFirst({
-      where: { title: "Pelayanan Kesehatan Sekolah" },
-    });
+    const [quesionerRows] = await pool.query(
+      `SELECT id, title FROM quesioners WHERE title = ? LIMIT 1`,
+      ["Pelayanan Kesehatan Sekolah"],
+    );
+    const quesioner = quesionerRows[0] ?? null;
 
     let questionnaireResult = null;
     let questionnaireProgress = 0;
@@ -457,13 +635,15 @@ export const getSchoolDashboardSummary = async (req, res) => {
 
     if (quesioner) {
       totalQuestionnaires = 1;
-      const response = await prisma.response.findFirst({
-        where: {
-          institutionId,
-          quisionerId: quesioner.id,
-        },
-        orderBy: { created_at: "desc" },
-      });
+      const [responseRows] = await pool.query(
+        `SELECT id, quisionerId, totalScore, institutionId, created_at
+         FROM responses
+         WHERE institutionId = ? AND quisionerId = ?
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [institutionId, quesioner.id],
+      );
+      const response = responseRows[0] ?? null;
 
       if (response) {
         answeredQuestionnaires = 1;
@@ -529,53 +709,77 @@ export const getHealthcareDashboardSummary = async (req, res) => {
   try {
     const user = req.user;
 
-    const institution = await prisma.institution.findFirst({
-      where: { user_id: user.id },
-    });
+    // findFirst in the original vs findUnique in the school dashboard — both
+    // compile to LIMIT 1 since institutions.user_id is @unique; no behavior
+    // difference, so a plain LIMIT 1 SELECT covers both.
+    const [institutionRows] = await pool.query(
+      `SELECT id, user_id, name FROM institutions WHERE user_id = ? LIMIT 1`,
+      [user.id],
+    );
+    const institution = institutionRows[0] ?? null;
 
     if (!institution) return errorResponse(res, null, "Institution not found");
 
     const institutionId = institution.id;
 
-    const [pending, processed, completed] = await Promise.all([
-      prisma.recommendation.count({
-        where: { healthcareInstitutionId: institutionId, status: "PENDING" },
-      }),
-      prisma.recommendation.count({
-        where: { healthcareInstitutionId: institutionId, status: "PROCESSED" },
-      }),
-      prisma.recommendation.count({
-        where: { healthcareInstitutionId: institutionId, status: "COMPLETED" },
-      }),
+    // Three counts, run in parallel — preserving the original Promise.all
+    // parallelism exactly. This fixed 3-element array IS the zero-fill for
+    // this handler: PENDING/PROCESSED/COMPLETED always appear, even at 0.
+    // Contrast with the admin dashboard's recByStatus groupBy (Task 34), which
+    // drops any status with zero rows instead of zero-filling it.
+    const [pendingResult, processedResult, completedResult] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(id) AS count FROM recommendations WHERE healthcareInstitutionId = ? AND status = ?`,
+        [institutionId, "PENDING"],
+      ),
+      pool.query(
+        `SELECT COUNT(id) AS count FROM recommendations WHERE healthcareInstitutionId = ? AND status = ?`,
+        [institutionId, "PROCESSED"],
+      ),
+      pool.query(
+        `SELECT COUNT(id) AS count FROM recommendations WHERE healthcareInstitutionId = ? AND status = ?`,
+        [institutionId, "COMPLETED"],
+      ),
     ]);
+    const pending = Number(pendingResult[0][0].count);
+    const processed = Number(processedResult[0][0].count);
+    const completed = Number(completedResult[0][0].count);
 
-    const totalPartnerSchools = await prisma.partnership.count({
-      where: { healthcareId: institutionId },
-    });
+    const [totalPartnerSchoolsRows] = await pool.query(
+      `SELECT COUNT(id) AS count FROM partnerships WHERE healthcareId = ?`,
+      [institutionId],
+    );
+    const totalPartnerSchools = Number(totalPartnerSchoolsRows[0].count);
 
-    const recentRecs = await prisma.recommendation.findMany({
-      where: { healthcareInstitutionId: institutionId, status: "PENDING" },
-      select: {
-        id: true,
-        createdAt: true,
-        student: {
-          select: {
-            nis: true,
-            familyMember: {
-              select: { fullName: true },
-            },
-            institution: {
-              select: { name: true },
-            },
-            class: {
-              select: { name: true },
-            },
-          },
-        },
+    // recentRecs — the ONE spot in this file where the response is genuinely
+    // nested, not flattened by a .map(). student.familyMember/institution are
+    // required relations (INNER JOIN safe); student.class is declared optional
+    // in the schema even though the FK itself is non-nullable (a schema
+    // quirk), so it needs a LEFT JOIN and must emit `class: null` — not
+    // `{ name: null }` — when absent.
+    const [recentRecsRows] = await pool.query(
+      `SELECT r.id, r.createdAt, s.nis, fm.fullName AS familyMemberFullName,
+              i.name AS institutionName, c.name AS className
+       FROM recommendations r
+       INNER JOIN students s ON s.id = r.studentId
+       INNER JOIN family_members fm ON fm.id = s.familyMemberId
+       INNER JOIN institutions i ON i.id = s.schoolId
+       LEFT JOIN classes c ON c.id = s.classId
+       WHERE r.healthcareInstitutionId = ? AND r.status = ?
+       ORDER BY r.createdAt DESC
+       LIMIT 5`,
+      [institutionId, "PENDING"],
+    );
+    const recentRecommendations = recentRecsRows.map((r) => ({
+      id: r.id,
+      createdAt: r.createdAt,
+      student: {
+        nis: r.nis,
+        familyMember: { fullName: r.familyMemberFullName },
+        institution: { name: r.institutionName },
+        class: r.className != null ? { name: r.className } : null,
       },
-      orderBy: { createdAt: "desc" },
-      take: 5,
-    });
+    }));
 
     const recByStatus = [
       { status: "PENDING", total: pending },
@@ -590,7 +794,7 @@ export const getHealthcareDashboardSummary = async (req, res) => {
         totalProcessed: processed,
         totalCompleted: completed,
         totalPartnerSchools,
-        recentRecommendations: recentRecs,
+        recentRecommendations,
         recommendationsByStatus: recByStatus,
       },
       "Healthcare dashboard summary retrieved successfully",
