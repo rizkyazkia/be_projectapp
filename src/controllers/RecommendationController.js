@@ -779,8 +779,12 @@ export const getInterventionsBelongToInstitution = async (req, res) => {
       LEFT JOIN users subu ON subu.id = r.submittedById
       LEFT JOIN institutions subu_i ON subu_i.user_id = subu.id
       WHERE vi.id = ? ${keywordSql}
-        AND iv.createdAt = (
-          SELECT MAX(iv2.createdAt) FROM interventions iv2 WHERE iv2.recommendationId = iv.recommendationId
+        -- createIntervention bulk-inserts both forType rows with one shared \`now\`, so createdAt ties are the norm; iv.id (UUID PK) guarantees exactly one match.
+        AND iv.id = (
+          SELECT iv2.id FROM interventions iv2
+          WHERE iv2.recommendationId = iv.recommendationId
+          ORDER BY iv2.createdAt DESC, iv2.id DESC
+          LIMIT 1
         )
       ORDER BY iv.createdAt DESC
       LIMIT 18446744073709551615 OFFSET ?`,

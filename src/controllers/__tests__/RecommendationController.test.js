@@ -761,6 +761,51 @@ describe("createIntervention", () => {
     expect(data.status).toBe("Success");
     expect(data.data).toEqual({ count: 2 });
   });
+
+  it("skips rollback in the outer catch when res.json throws after a successful commit (committed guard genuinely exercised)", async () => {
+    const req = {
+      user: { id: "user-health-1", role: "healthcare" },
+      params: { id: "rec-1" },
+      body: { content: { note: "periksa gizi" }, forType: "PARENT", notes: "catatan" },
+    };
+    const res = mockRes();
+    res.json.mockImplementationOnce(() => {
+      throw new Error("res.json failed");
+    });
+
+    randomUUID.mockReturnValueOnce("iv-uuid-1").mockReturnValueOnce("iv-uuid-2");
+
+    const mockConnection = {
+      beginTransaction: vi.fn(),
+      query: vi.fn(),
+      commit: vi.fn(),
+      rollback: vi.fn(),
+      release: vi.fn(),
+    };
+    pool.getConnection.mockResolvedValueOnce(mockConnection);
+    mockConnection.query
+      .mockResolvedValueOnce([{ affectedRows: 2 }]) // bulk INSERT
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE status
+
+    pool.query
+      .mockResolvedValueOnce([
+        [{ id: "rec-1", fm_id: "fm-1", fm_fullName: "Budi", parent_user_id: "user-parent-1" }],
+        [],
+      ]) // recommendation -> student -> familyMember -> family -> user
+      .mockResolvedValueOnce([[{ institution_name: "Kecamatan A" }], []]); // puskesmas institution name
+
+    await createIntervention(req, res);
+
+    // res.json's first call threw, reaching the outer catch - but since commit()
+    // already succeeded (committed === true), the rollback guard must skip rollback.
+    expect(mockConnection.commit).toHaveBeenCalledTimes(1);
+    expect(mockConnection.rollback).not.toHaveBeenCalled();
+    expect(mockConnection.release).toHaveBeenCalledTimes(1);
+
+    // errorResponse's own failure path still ran without crashing/hanging;
+    // res.json was invoked a second time (first call threw, caught by outer catch).
+    expect(res.json).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("getSingleRecommendation", () => {
@@ -852,7 +897,7 @@ describe("getSingleRecommendation", () => {
 });
 
 describe("getInterventionsBelongToInstitution", () => {
-  it("dedupes to one intervention per recommendation via a correlated MAX(createdAt) subquery, applies OFFSET with no LIMIT, and preserves the length-based totalPages bug", async () => {
+  it("dedupes to one intervention per recommendation via a correlated iv.id tiebreaker subquery, applies OFFSET with no LIMIT, and preserves the length-based totalPages bug", async () => {
     const req = {
       user: { id: "user-health-1" },
       query: { page: "0", limit: "10", keyword: "" },
@@ -880,10 +925,9 @@ describe("getInterventionsBelongToInstitution", () => {
 
     await getInterventionsBelongToInstitution(req, res);
 
-    expect(pool.query.mock.calls[1][0]).toContain("iv.createdAt = (");
-    expect(pool.query.mock.calls[1][0]).toContain(
-      "SELECT MAX(iv2.createdAt) FROM interventions iv2 WHERE iv2.recommendationId = iv.recommendationId",
-    );
+    expect(pool.query.mock.calls[1][0]).toContain("iv.id = (");
+    expect(pool.query.mock.calls[1][0]).toContain("SELECT iv2.id FROM interventions iv2");
+    expect(pool.query.mock.calls[1][0]).toContain("ORDER BY iv2.createdAt DESC, iv2.id DESC\n          LIMIT 1");
     expect(pool.query.mock.calls[1][0]).toContain("LIMIT 18446744073709551615 OFFSET ?");
     expect(pool.query.mock.calls[1][1]).toEqual([5, 0]);
     expect(pool.query.mock.calls[2][1]).toEqual([["fam-2"]]);
