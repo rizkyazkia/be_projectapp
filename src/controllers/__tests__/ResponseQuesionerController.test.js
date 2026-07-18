@@ -17,6 +17,7 @@ import {
   createResponseQuesionerInstitution,
   checkAnsweredQuesionerInstitution,
   showResponseForParent,
+  showResponseForInstitution,
 } from "../ResponseQuesionerController.js";
 
 function mockRes() {
@@ -1041,6 +1042,130 @@ describe("showResponseForParent", () => {
     pool.query.mockRejectedValueOnce(new Error("Connection lost"));
 
     await showResponseForParent(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Failed to get response",
+      error: "Connection lost",
+    });
+  });
+});
+
+describe("showResponseForInstitution", () => {
+  it("returns all questions with paginated, boolean-coerced answers", async () => {
+    const req = {
+      params: { user_id: "1", id: "5" },
+      query: {},
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, name: "Puskesmas A" }], []]) // institutions, looked up by id
+      .mockResolvedValueOnce([
+        [{ id: "resp-1", institutionId: 1, quisionerId: 5 }],
+        [],
+      ]) // responses
+      .mockResolvedValueOnce([
+        [{ id: 10, quesioner_id: 5, title: "Q1", type: "SCALE" }],
+        [],
+      ]) // questions, unpaginated
+      .mockResolvedValueOnce([
+        [{ id: 100, question_id: 10, title: "High", score: 2 }],
+        [],
+      ]) // options
+      .mockResolvedValueOnce([[{ count: 1 }], []]) // totalRows (answers count)
+      .mockResolvedValueOnce([
+        [
+          {
+            id: 1000,
+            questionId: 10,
+            responseId: "resp-1",
+            option_id: 100,
+            score: 2,
+            boolean_value: 1,
+            scaleValue: 2,
+          },
+        ],
+        [],
+      ]); // answers, paginated
+
+    await showResponseForInstitution(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("FROM institutions WHERE id"),
+      [1]
+    );
+
+    const payload = res.json.mock.calls[0][0];
+    expect(payload.data.answers[0].boolean_value).toBe(true);
+  });
+
+  it("returns 500 (404-as-error bug) when institution not found", async () => {
+    const req = { params: { user_id: "999", id: "5" }, query: {} };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    await showResponseForInstitution(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 404, message: "Institution not found" })
+    );
+  });
+
+  it("returns the hardcoded empty shape (limit:10 preserved bug) when no response exists", async () => {
+    const req = {
+      params: { user_id: "1", id: "5" },
+      query: { limit: "50" },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, name: "Puskesmas A" }], []])
+      .mockResolvedValueOnce([[], []]);
+
+    await showResponseForInstitution(req, res);
+
+    expect(res.json).toHaveBeenCalledWith({
+      totalRows: 0,
+      totalPage: 0,
+      page: 0,
+      limit: 10,
+      questions: [],
+      answers: [],
+    });
+  });
+
+  it("skips the options, count, and answers queries when no questions match", async () => {
+    const req = { params: { user_id: "1", id: "5" }, query: {} };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, name: "Puskesmas A" }], []])
+      .mockResolvedValueOnce([
+        [{ id: "resp-1", institutionId: 1, quisionerId: 5 }],
+        [],
+      ])
+      .mockResolvedValueOnce([[], []]); // no questions
+
+    await showResponseForInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(3);
+    const payload = res.json.mock.calls[0][0];
+    expect(payload.data.totalRows).toBe(0);
+    expect(payload.data.answers).toEqual([]);
+  });
+
+  it("returns 500 via the catch block when pool.query rejects unexpectedly", async () => {
+    const req = { params: { user_id: "1", id: "5" }, query: {} };
+    const res = mockRes();
+
+    pool.query.mockRejectedValueOnce(new Error("Connection lost"));
+
+    await showResponseForInstitution(req, res);
 
     expect(pool.query).toHaveBeenCalledTimes(1);
     expect(res.status).toHaveBeenCalledWith(500);
