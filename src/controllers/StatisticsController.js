@@ -1,8 +1,5 @@
-import { PrismaClient } from "@prisma/client";
 import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
-
-const prisma = new PrismaClient();
 
 // NOTE: mysql2 can return COUNT(*)/COUNT(id) results as a JS number or as a
 // string representation of a BIGINT, depending on driver/row configuration.
@@ -712,53 +709,77 @@ export const getHealthcareDashboardSummary = async (req, res) => {
   try {
     const user = req.user;
 
-    const institution = await prisma.institution.findFirst({
-      where: { user_id: user.id },
-    });
+    // findFirst in the original vs findUnique in the school dashboard — both
+    // compile to LIMIT 1 since institutions.user_id is @unique; no behavior
+    // difference, so a plain LIMIT 1 SELECT covers both.
+    const [institutionRows] = await pool.query(
+      `SELECT id, user_id, name FROM institutions WHERE user_id = ? LIMIT 1`,
+      [user.id],
+    );
+    const institution = institutionRows[0] ?? null;
 
     if (!institution) return errorResponse(res, null, "Institution not found");
 
     const institutionId = institution.id;
 
-    const [pending, processed, completed] = await Promise.all([
-      prisma.recommendation.count({
-        where: { healthcareInstitutionId: institutionId, status: "PENDING" },
-      }),
-      prisma.recommendation.count({
-        where: { healthcareInstitutionId: institutionId, status: "PROCESSED" },
-      }),
-      prisma.recommendation.count({
-        where: { healthcareInstitutionId: institutionId, status: "COMPLETED" },
-      }),
+    // Three counts, run in parallel — preserving the original Promise.all
+    // parallelism exactly. This fixed 3-element array IS the zero-fill for
+    // this handler: PENDING/PROCESSED/COMPLETED always appear, even at 0.
+    // Contrast with the admin dashboard's recByStatus groupBy (Task 34), which
+    // drops any status with zero rows instead of zero-filling it.
+    const [pendingResult, processedResult, completedResult] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(id) AS count FROM recommendations WHERE healthcareInstitutionId = ? AND status = ?`,
+        [institutionId, "PENDING"],
+      ),
+      pool.query(
+        `SELECT COUNT(id) AS count FROM recommendations WHERE healthcareInstitutionId = ? AND status = ?`,
+        [institutionId, "PROCESSED"],
+      ),
+      pool.query(
+        `SELECT COUNT(id) AS count FROM recommendations WHERE healthcareInstitutionId = ? AND status = ?`,
+        [institutionId, "COMPLETED"],
+      ),
     ]);
+    const pending = Number(pendingResult[0][0].count);
+    const processed = Number(processedResult[0][0].count);
+    const completed = Number(completedResult[0][0].count);
 
-    const totalPartnerSchools = await prisma.partnership.count({
-      where: { healthcareId: institutionId },
-    });
+    const [totalPartnerSchoolsRows] = await pool.query(
+      `SELECT COUNT(id) AS count FROM partnerships WHERE healthcareId = ?`,
+      [institutionId],
+    );
+    const totalPartnerSchools = Number(totalPartnerSchoolsRows[0].count);
 
-    const recentRecs = await prisma.recommendation.findMany({
-      where: { healthcareInstitutionId: institutionId, status: "PENDING" },
-      select: {
-        id: true,
-        createdAt: true,
-        student: {
-          select: {
-            nis: true,
-            familyMember: {
-              select: { fullName: true },
-            },
-            institution: {
-              select: { name: true },
-            },
-            class: {
-              select: { name: true },
-            },
-          },
-        },
+    // recentRecs — the ONE spot in this file where the response is genuinely
+    // nested, not flattened by a .map(). student.familyMember/institution are
+    // required relations (INNER JOIN safe); student.class is declared optional
+    // in the schema even though the FK itself is non-nullable (a schema
+    // quirk), so it needs a LEFT JOIN and must emit `class: null` — not
+    // `{ name: null }` — when absent.
+    const [recentRecsRows] = await pool.query(
+      `SELECT r.id, r.createdAt, s.nis, fm.fullName AS familyMemberFullName,
+              i.name AS institutionName, c.name AS className
+       FROM recommendations r
+       INNER JOIN students s ON s.id = r.studentId
+       INNER JOIN family_members fm ON fm.id = s.familyMemberId
+       INNER JOIN institutions i ON i.id = s.schoolId
+       LEFT JOIN classes c ON c.id = s.classId
+       WHERE r.healthcareInstitutionId = ? AND r.status = ?
+       ORDER BY r.createdAt DESC
+       LIMIT 5`,
+      [institutionId, "PENDING"],
+    );
+    const recentRecommendations = recentRecsRows.map((r) => ({
+      id: r.id,
+      createdAt: r.createdAt,
+      student: {
+        nis: r.nis,
+        familyMember: { fullName: r.familyMemberFullName },
+        institution: { name: r.institutionName },
+        class: r.className != null ? { name: r.className } : null,
       },
-      orderBy: { createdAt: "desc" },
-      take: 5,
-    });
+    }));
 
     const recByStatus = [
       { status: "PENDING", total: pending },
@@ -773,7 +794,7 @@ export const getHealthcareDashboardSummary = async (req, res) => {
         totalProcessed: processed,
         totalCompleted: completed,
         totalPartnerSchools,
-        recentRecommendations: recentRecs,
+        recentRecommendations,
         recommendationsByStatus: recByStatus,
       },
       "Healthcare dashboard summary retrieved successfully",
