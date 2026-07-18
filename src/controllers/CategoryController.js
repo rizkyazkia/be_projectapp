@@ -1,7 +1,5 @@
-import { PrismaClient } from "@prisma/client";
+import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
-
-const prisma = new PrismaClient();
 
 export const getCategory = async (req, res) => {
   const page = parseInt(req.query.page) || 0;
@@ -10,32 +8,17 @@ export const getCategory = async (req, res) => {
   const offset = limit * page;
 
   try {
-    const totalRows = await prisma.category.count({
-      where: {
-        name: {
-          contains: search,
-        },
-      },
-    });
+    const [countRows] = await pool.query(
+      "SELECT COUNT(*) AS count FROM categories WHERE name LIKE ?",
+      [`%${search}%`]
+    );
+    const totalRows = countRows[0].count;
 
     const totalPage = Math.ceil(totalRows / limit);
-    const categories = await prisma.category.findMany({
-      where: {
-        name: {
-          contains: search,
-        },
-      },
-      select: {
-        id: true,
-        name: true,
-        path: true,
-      },
-      skip: offset,
-      take: limit,
-      orderBy: {
-        id: "asc",
-      },
-    });
+    const [categories] = await pool.query(
+      "SELECT id, name, path FROM categories WHERE name LIKE ? ORDER BY id ASC LIMIT ? OFFSET ?",
+      [`%${search}%`, limit, offset]
+    );
 
     return successResponse(
       res,

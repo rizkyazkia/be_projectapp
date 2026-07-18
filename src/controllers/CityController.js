@@ -1,17 +1,10 @@
-import { PrismaClient } from "@prisma/client";
+import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
-
-const prisma = new PrismaClient();
 
 export const getCities = async (req, res) => {
   try {
-    const response = await prisma.city.findMany({
-      select: {
-        id: true,
-        name: true,
-      },
-    });
-    return successResponse(res, response, "Cities retrieved successfully");
+    const [rows] = await pool.query("SELECT id, name FROM cities");
+    return successResponse(res, rows, "Cities retrieved successfully");
   } catch (error) {
     return errorResponse(res, error, "Failed to retrieve cities");
   }
@@ -20,32 +13,39 @@ export const getCities = async (req, res) => {
 export const getCitiesByProvince = async (req, res) => {
   try {
     const { id } = req.params;
-    const response = await prisma.city.findMany({
-      where: { province_id: Number(id) },
-      select: {
-        id: true,
-        name: true,
-        province_id: true,
-      }
-    });
-    return successResponse(res, response, "Berhasil mendapatkan data kota berdasarkan provinsi");
+    const [rows] = await pool.query(
+      "SELECT id, name, province_id FROM cities WHERE province_id = ?",
+      [Number(id)]
+    );
+    return successResponse(
+      res,
+      rows,
+      "Berhasil mendapatkan data kota berdasarkan provinsi"
+    );
   } catch (error) {
-    return errorResponse(res, error, "Gagal mendapatkan data kota berdasarkan provinsi");
+    return errorResponse(
+      res,
+      error,
+      "Gagal mendapatkan data kota berdasarkan provinsi"
+    );
   }
-}
+};
 
 export const createCity = async (req, res) => {
   try {
     const { id } = req.params;
     const { name } = req.body;
-    const response = await prisma.city.create({
-      data: {
-        name,
-        province_id: Number(id),
-      }
-    });
+    const [result] = await pool.query(
+      "INSERT INTO cities (name, province_id) VALUES (?, ?)",
+      [name, Number(id)]
+    );
+    const [rows] = await pool.query(
+      "SELECT id, name, province_id FROM cities WHERE id = ?",
+      [result.insertId]
+    );
+    const response = rows[0];
     return successResponse(res, response, "Berhasil menambahkan kota baru");
   } catch (error) {
     return errorResponse(res, error, "Gagal menambahkan kota baru");
   }
-}
+};

@@ -1,12 +1,12 @@
-import { PrismaClient } from "@prisma/client";
+import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
-
-const prisma = new PrismaClient();
 
 export const getJobs = async (req, res) => {
   try {
-    const jobs = await prisma.job.findMany();
-    return successResponse(res, jobs, "Jobs retrieved successfully");
+    const [rows] = await pool.query(
+      "SELECT id, jobTypeId, createdAt, updatedAt FROM jobs"
+    );
+    return successResponse(res, rows, "Jobs retrieved successfully");
   } catch (error) {
     return errorResponse(res, error, "Failed to retrieve jobs");
   }
@@ -14,14 +14,8 @@ export const getJobs = async (req, res) => {
 
 export const getJobTypes = async (req, res) => {
   try {
-    const jobTypes = await prisma.jobType.findMany({
-      select: {
-        id: true,
-        name: true,
-        type: true,
-      },
-    });
-    return successResponse(res, jobTypes, "Job types retrieved successfully");
+    const [rows] = await pool.query("SELECT id, name, type FROM job_types");
+    return successResponse(res, rows, "Job types retrieved successfully");
   } catch (error) {
     return errorResponse(res, error, "Failed to retrieve job types");
   }
