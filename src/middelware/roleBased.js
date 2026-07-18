@@ -1,29 +1,20 @@
-import { PrismaClient } from "@prisma/client";
+import pool from "../config/db.js";
 import { errorResponse } from "../helpers/ResponseHelper.js";
-
-const prisma = new PrismaClient();
 
 export const roleBased = (roles) => {
   return async (req, res, next) => {
     try {
       if (!req.user) return errorResponse(res, null, "User tidak ditemukan");
 
-      const user = await prisma.user.findFirst({
-        where: {
-          id: req.user.id,
-        },
-        include: {
-          role: {
-            select: {
-              name: true,
-            },
-          },
-        },
-      });
+      const [rows] = await pool.query(
+        "SELECT r.name AS role_name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = ? LIMIT 1",
+        [req.user.id]
+      );
 
-      if (!user) return errorResponse(res, null, "User tidak ditemukan");
+      if (rows.length === 0)
+        return errorResponse(res, null, "User tidak ditemukan");
 
-      const userRole = user.role.name;
+      const userRole = rows[0].role_name;
 
       if (typeof roles === "string") {
         roles = [roles];
