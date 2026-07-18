@@ -12,18 +12,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Upload source via SCP
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies and generate Prisma Client
+        env:
+          PRISMA_CLI_BINARY_TARGETS: rhel-openssl-3.0.x
+        run: |
+          npm ci --omit=dev
+          npx prisma generate
+
+      - name: Upload prebuilt app via SCP
         uses: appleboy/scp-action@917f8b81dfc1ccd331fef9e2d61bdc6c8be94634 # v0.1.7
         with:
           host: ${{ secrets.RUMAHWEB_SSH_HOST }}
           port: ${{ secrets.RUMAHWEB_SSH_PORT }}
           username: ${{ secrets.RUMAHWEB_SSH_USER }}
           key: ${{ secrets.RUMAHWEB_SSH_KEY }}
-          source: "src/,prisma/,package.json,package-lock.json"
+          source: "src/,prisma/,package.json,package-lock.json,node_modules/"
           target: ${{ secrets.RUMAHWEB_BE_PATH }}
           strip_components: 0
 
-      - name: Install deps, restart app
+      - name: Restart app
         uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
         with:
           host: ${{ secrets.RUMAHWEB_SSH_HOST }}
@@ -32,18 +44,12 @@ jobs:
           key: ${{ secrets.RUMAHWEB_SSH_KEY }}
           script: |
             set -e
-            # Activates the Node.js Selector virtualenv cPanel created for this app.
-            # Path looks like: /home/<cpanel_user>/nodevenv/<app_dir>/<node_version>
-            source ${{ secrets.RUMAHWEB_NODEVENV_PATH }}/bin/activate
             cd ${{ secrets.RUMAHWEB_BE_PATH }}
-            # Forces the correct engine binary at install time too - this host's
-            # platform auto-detection otherwise grabs an incompatible binary
-            # (debian-openssl-1.1.x) and @prisma/engines' postinstall crashes.
-            export PRISMA_CLI_BINARY_TARGETS=rhel-openssl-3.0.x
-            npm ci --omit=dev
-            npx prisma generate
             mkdir -p tmp && touch tmp/restart.txt
+            # node_modules (including the generated Prisma Client and its engine
+            # binary) is built entirely on the GitHub Actions runner and uploaded
+            # as-is - npm ci/prisma generate never run on the server itself,
+            # since this host's shared-hosting account can't sustain them
+            # (confirmed with rumahweb support: process/resource limits).
             # Migrations are applied manually from a local machine against the
-            # external DB host (see README) instead of from the server itself:
-            # the shared hosting account's process limit gets exhausted when
-            # prisma migrate deploy is run on-box against this database.
+            # external DB host for the same reason.
