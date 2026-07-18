@@ -3,13 +3,18 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../../config/db.js", () => ({
   default: { query: vi.fn(), getConnection: vi.fn() },
 }));
+vi.mock("node:crypto", () => ({
+  randomUUID: vi.fn(),
+}));
 
 import pool from "../../config/db.js";
+import { randomUUID } from "node:crypto";
 import {
   getFamily,
   getFamilyMemberByUser,
   getFamilyMember,
   getParentsByFamilyMemberId,
+  createFamilyMember,
 } from "../FamilyController.js";
 
 function mockRes() {
@@ -21,8 +26,12 @@ function mockRes() {
   return res;
 }
 
+let uuidCounter = 0;
+
 beforeEach(() => {
   vi.clearAllMocks();
+  uuidCounter = 0;
+  randomUUID.mockImplementation(() => `uuid-${++uuidCounter}`);
 });
 
 describe("getFamily", () => {
@@ -395,5 +404,386 @@ describe("getParentsByFamilyMemberId", () => {
     const body = res.json.mock.calls[0][0];
     expect(body.status).toBe("error");
     expect(body.message).toBe("Failed to retrieve parents");
+  });
+});
+
+describe("createFamilyMember", () => {
+  it("returns 'Family not found' when the caller has no family yet", async () => {
+    pool.query.mockResolvedValueOnce([[], []]); // families lookup, empty
+
+    const req = {
+      user: { id: "user-1" },
+      body: [{ type: "ibu", relation: "IBU" }],
+    };
+    const res = mockRes();
+
+    await createFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Family not found",
+      error: null,
+    });
+  });
+
+  it("creates a new ibu member with a new socio_economic row and a new job row", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []]) // families lookup
+      .mockResolvedValueOnce([[], []]) // existingFamilyMember lookup (none yet)
+      .mockResolvedValueOnce([{ insertId: 10 }]) // INSERT socio_economic
+      .mockResolvedValueOnce([{ insertId: 20 }]) // INSERT jobs
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // INSERT family_members
+
+    const req = {
+      user: { id: "user-1" },
+      body: [
+        {
+          type: "ibu",
+          fullName: "Ibu Satu",
+          age: "30",
+          education: "S1",
+          jobTypeId: 2,
+          relation: "IBU",
+          phone: "0800",
+          residenceStatus: "MILIK_SENDIRI",
+          address: "Jl. Mawar",
+          childrenCount: "SATU",
+          underFiveCount: "TIDAK_ADA",
+          familyIncomeLevel: "LEBIH_DARI_SEPULUH_JUTA",
+        },
+      ],
+    };
+    const res = mockRes();
+
+    await createFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("WHERE fm.familyId = ? AND fm.relation = ?"),
+      ["family-1", "IBU"],
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("INSERT INTO socio_economic"),
+      ["MILIK_SENDIRI", "Jl. Mawar", "SATU", "TIDAK_ADA", "LEBIH_DARI_SEPULUH_JUTA"],
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining("INSERT INTO jobs (jobTypeId) VALUES (?)"),
+      [2],
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      5,
+      expect.stringContaining("INSERT INTO family_members"),
+      ["uuid-1", "Ibu Satu", 30, "S1", "IBU", "family-1", "0800", 20, 10, true],
+    );
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.json.mock.calls[0][0];
+    expect(body.data[0].familyMember).toEqual({
+      id: "uuid-1",
+      fullName: "Ibu Satu",
+      age: 30,
+      education: "S1",
+      relation: "IBU",
+      familyId: "family-1",
+      phone: "0800",
+      jobId: 20,
+      socioEconomicId: 10,
+      isCompleted: true,
+    });
+  });
+
+  it("updates an existing ibu member and reuses/updates the existing job row", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []]) // families lookup
+      .mockResolvedValueOnce([
+        [{ id: "existing-fm-1", job_id: 99, job_jobTypeId: 5 }],
+        [],
+      ]) // existingFamilyMember lookup (found, has a job)
+      .mockResolvedValueOnce([{ insertId: 11 }]) // INSERT socio_economic (still created fresh for ibu)
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // UPDATE jobs
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE family_members
+
+    const req = {
+      user: { id: "user-1" },
+      body: [
+        {
+          type: "ibu",
+          fullName: "Ibu Satu Updated",
+          age: "31",
+          education: "S2",
+          jobTypeId: 6,
+          relation: "IBU",
+          phone: "0801",
+          residenceStatus: "MENYEWA",
+          address: "Jl. Melati",
+          childrenCount: "DUA_SAMPAI_TIGA",
+          underFiveCount: "SATU",
+          familyIncomeLevel: "KURANG_DARI_LIMA_JUTA",
+        },
+      ],
+    };
+    const res = mockRes();
+
+    await createFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining("UPDATE jobs SET jobTypeId = ? WHERE id = ?"),
+      [6, 99],
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      5,
+      expect.stringContaining("UPDATE family_members"),
+      [
+        "Ibu Satu Updated",
+        31,
+        "S2",
+        "IBU",
+        "family-1",
+        "0801",
+        99,
+        11,
+        true,
+        "existing-fm-1",
+      ],
+    );
+
+    const body = res.json.mock.calls[0][0];
+    expect(body.data[0].familyMember.id).toBe("existing-fm-1");
+    expect(body.data[0].familyMember.jobId).toBe(99);
+  });
+
+  it("creates an ayah member with sameSocioEconomic reusing the IBU's socioEconomicId", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []]) // families lookup
+      .mockResolvedValueOnce([[], []]) // existingFamilyMember lookup (none)
+      .mockResolvedValueOnce([[{ socioEconomicId: 10 }], []]) // IBU lookup
+      .mockResolvedValueOnce([{ insertId: 21 }]) // INSERT jobs
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // INSERT family_members
+
+    const req = {
+      user: { id: "user-1" },
+      body: [
+        {
+          type: "ayah",
+          fullName: "Ayah Satu",
+          age: "35",
+          education: "S1",
+          jobTypeId: 3,
+          relation: "AYAH",
+          phone: "0802",
+          sameSocioEconomic: true,
+        },
+      ],
+    };
+    const res = mockRes();
+
+    await createFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("relation = 'IBU'"),
+      ["family-1"],
+    );
+    // No socio_economic INSERT should run when sameSocioEconomic reuses IBU's id.
+    expect(pool.query).not.toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO socio_economic"),
+      expect.anything(),
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      5,
+      expect.stringContaining("INSERT INTO family_members"),
+      ["uuid-1", "Ayah Satu", 35, "S1", "AYAH", "family-1", "0802", 21, 10, true],
+    );
+
+    const body = res.json.mock.calls[0][0];
+    expect(body.data[0].familyMember.socioEconomicId).toBe(10);
+  });
+
+  it("pushes an error and continues when sameSocioEconomic is set but no IBU exists yet", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []]) // families lookup
+      .mockResolvedValueOnce([[], []]) // existingFamilyMember lookup for ayah (none)
+      .mockResolvedValueOnce([[], []]) // IBU lookup — not found
+      .mockResolvedValueOnce([[], []]) // existingFamilyMember lookup for the 2nd member (invalid type)
+      ;
+
+    const req = {
+      user: { id: "user-1" },
+      body: [
+        {
+          type: "ayah",
+          relation: "AYAH",
+          sameSocioEconomic: true,
+        },
+        {
+          type: "unknown-type",
+          relation: "LAINNYA",
+        },
+      ],
+    };
+    const res = mockRes();
+
+    await createFamilyMember(req, res);
+
+    // The loop must continue to the 2nd member instead of aborting.
+    expect(pool.query).toHaveBeenCalledTimes(4);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const body = res.json.mock.calls[0][0];
+    expect(body.message).toBe(
+      "Data ibu tidak ditemukan, isi data ibu terlebih dahulu",
+    );
+    expect(body.error.errors).toEqual([
+      {
+        error: "Data ibu tidak ditemukan, isi data ibu terlebih dahulu",
+        member: req.body[0],
+      },
+      { error: "Invalid type", member: req.body[1] },
+    ]);
+  });
+
+  it("creates an anak member with bmi/nutrition/student rows derived from bmi_references", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []]) // families lookup
+      .mockResolvedValueOnce([[], []]) // existingFamilyMember lookup (none)
+      .mockResolvedValueOnce([
+        [{ sdMinus2Min: 14, sdPlus1Max: 20 }],
+        [],
+      ]) // bmi_references lookup
+      .mockResolvedValueOnce([[{ id: 1, status: "GIZI_BAIK" }], []]) // nutrition_status lookup
+      .mockResolvedValueOnce([[{ socioEconomicId: 10 }], []]) // parent lookup
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // INSERT family_members
+      .mockResolvedValueOnce([[], []]) // existingStudent lookup (none)
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // INSERT students
+      .mockResolvedValueOnce([[], []]) // existingNutrition lookup (none)
+      .mockResolvedValueOnce([{ insertId: 55 }]); // INSERT nutritions
+
+    const req = {
+      user: { id: "user-1" },
+      body: [
+        {
+          type: "anak",
+          fullName: "Anak Satu",
+          birthDate: "2020-01-01",
+          education: "TIDAK_SEKOLAH",
+          gender: "L",
+          relation: "ANAK",
+          phone: "0803",
+          height: "90",
+          weight: "13",
+          nis: "12345",
+          schoolYear: "2025/2026",
+          semester: "1",
+          schoolId: 7,
+          classId: 3,
+        },
+      ],
+    };
+    const res = mockRes();
+
+    await createFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("FROM bmi_references WHERE gender = ?"),
+      expect.arrayContaining(["L"]),
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      6,
+      expect.stringContaining("INSERT INTO family_members"),
+      expect.arrayContaining(["uuid-1", "Anak Satu", "TIDAK_SEKOLAH", "L", "ANAK", "family-1", "0803", 10, true]),
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      8,
+      expect.stringContaining("INSERT INTO students"),
+      ["uuid-2", "12345", "2025/2026", "1", 7, 3, "uuid-1"],
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      10,
+      expect.stringContaining("INSERT INTO nutritions"),
+      [90, 13, expect.closeTo(16.05, 1), 1, "uuid-1", "user-1"],
+    );
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.json.mock.calls[0][0];
+    expect(body.data[0].student.id).toBe("uuid-2");
+    expect(body.data[0].nutrition.id).toBe(55);
+  });
+
+  it("pushes an error when no bmi_references match the child's age", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []])
+      .mockResolvedValueOnce([[], []]) // existingFamilyMember
+      .mockResolvedValueOnce([[], []]); // bmi_references — no match
+
+    const req = {
+      user: { id: "user-1" },
+      body: {
+        type: "anak",
+        birthDate: "2020-01-01",
+        gender: "L",
+        relation: "ANAK",
+        height: "90",
+        weight: "13",
+      },
+    };
+    const res = mockRes();
+
+    await createFamilyMember(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(3);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const body = res.json.mock.calls[0][0];
+    expect(body.message).toBe("Referensi BMI tidak ditemukan untuk usia anak ini");
+  });
+
+  it("pushes an error when neither parent has a socioEconomicId yet", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []])
+      .mockResolvedValueOnce([[], []]) // existingFamilyMember
+      .mockResolvedValueOnce([[{ sdMinus2Min: 14, sdPlus1Max: 20 }], []]) // bmi_references
+      .mockResolvedValueOnce([[{ id: 1, status: "GIZI_BAIK" }], []]) // nutrition_status
+      .mockResolvedValueOnce([[], []]); // parent lookup — none found
+
+    const req = {
+      user: { id: "user-1" },
+      body: {
+        type: "anak",
+        birthDate: "2020-01-01",
+        gender: "L",
+        relation: "ANAK",
+        height: "90",
+        weight: "13",
+      },
+    };
+    const res = mockRes();
+
+    await createFamilyMember(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    const body = res.json.mock.calls[0][0];
+    expect(body.message).toBe("Data orang tua tidak ditemukan");
+  });
+
+  it("pushes an 'Invalid type' error for unrecognized member types", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []])
+      .mockResolvedValueOnce([[], []]); // existingFamilyMember lookup still runs before the type check
+
+    const req = {
+      user: { id: "user-1" },
+      body: { type: "kakek", relation: "LAINNYA" },
+    };
+    const res = mockRes();
+
+    await createFamilyMember(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    const body = res.json.mock.calls[0][0];
+    expect(body.message).toBe("Invalid type");
   });
 });

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
@@ -302,11 +303,11 @@ export const createFamilyMember = async (req, res) => {
       members = [members];
     }
 
-    const familyByUser = await prisma.family.findUnique({
-      where: {
-        userId: user.id,
-      },
-    });
+    const [familyByUserRows] = await pool.query(
+      "SELECT * FROM families WHERE userId = ? LIMIT 1",
+      [user.id],
+    );
+    const familyByUser = familyByUserRows[0];
 
     if (!familyByUser) {
       return errorResponse(res, null, "Family not found");
@@ -342,36 +343,50 @@ export const createFamilyMember = async (req, res) => {
 
       let job, socioEconomic, familyMember, nutrition, student, parent;
 
-      const existingFamilyMember = await prisma.familyMember.findFirst({
-        where: {
-          familyId: familyByUser.id,
-          relation,
-        },
-        include: {
-          job: true,
-        },
-      });
+      const [existingRows] = await pool.query(
+        `SELECT fm.id, job.id AS job_id, job.jobTypeId AS job_jobTypeId
+         FROM family_members fm
+         LEFT JOIN jobs job ON job.id = fm.jobId
+         WHERE fm.familyId = ? AND fm.relation = ?
+         LIMIT 1`,
+        [familyByUser.id, relation],
+      );
+      const existingRow = existingRows[0];
+      const existingFamilyMember = existingRow
+        ? {
+            id: existingRow.id,
+            job: existingRow.job_id
+              ? { id: existingRow.job_id, jobTypeId: existingRow.job_jobTypeId }
+              : null,
+          }
+        : null;
 
       if (type === "ibu") {
-        socioEconomic = await prisma.socioEconomic.create({
-          data: {
-            residenceStatus,
-            address,
-            childrenCount,
-            underFiveCount,
-            familyIncomeLevel,
-          },
-        });
+        const [seResult] = await pool.query(
+          "INSERT INTO socio_economic (residenceStatus, address, childrenCount, underFiveCount, familyIncomeLevel) VALUES (?, ?, ?, ?, ?)",
+          [residenceStatus, address, childrenCount, underFiveCount, familyIncomeLevel],
+        );
+        socioEconomic = {
+          id: seResult.insertId,
+          residenceStatus,
+          address,
+          childrenCount,
+          underFiveCount,
+          familyIncomeLevel,
+        };
 
         if (existingFamilyMember && existingFamilyMember.job) {
-          job = await prisma.job.update({
-            where: { id: existingFamilyMember.job.id },
-            data: { jobTypeId },
-          });
+          await pool.query("UPDATE jobs SET jobTypeId = ? WHERE id = ?", [
+            jobTypeId,
+            existingFamilyMember.job.id,
+          ]);
+          job = { id: existingFamilyMember.job.id, jobTypeId };
         } else {
-          job = await prisma.job.create({
-            data: { jobTypeId },
-          });
+          const [jobResult] = await pool.query(
+            "INSERT INTO jobs (jobTypeId) VALUES (?)",
+            [jobTypeId],
+          );
+          job = { id: jobResult.insertId, jobTypeId };
         }
 
         if (!job || !job.id) {
@@ -380,46 +395,76 @@ export const createFamilyMember = async (req, res) => {
         }
 
         if (existingFamilyMember) {
-          familyMember = await prisma.familyMember.update({
-            where: { id: existingFamilyMember.id },
-            data: {
+          await pool.query(
+            `UPDATE family_members
+             SET fullName = ?, age = ?, education = ?, relation = ?, familyId = ?, phone = ?, jobId = ?, socioEconomicId = ?, isCompleted = ?
+             WHERE id = ?`,
+            [
               fullName,
-              age: age ? parseInt(age) : null,
+              age ? Number.parseInt(age) : null,
               education,
               relation,
-              familyId: familyByUser.id,
+              familyByUser.id,
               phone,
-              jobId: job.id,
-              socioEconomicId: socioEconomic.id,
-              isCompleted: true,
-            },
-          });
+              job.id,
+              socioEconomic.id,
+              true,
+              existingFamilyMember.id,
+            ],
+          );
+          familyMember = {
+            id: existingFamilyMember.id,
+            fullName,
+            age: age ? Number.parseInt(age) : null,
+            education,
+            relation,
+            familyId: familyByUser.id,
+            phone,
+            jobId: job.id,
+            socioEconomicId: socioEconomic.id,
+            isCompleted: true,
+          };
         } else {
-          familyMember = await prisma.familyMember.create({
-            data: {
+          const newId = randomUUID();
+          await pool.query(
+            `INSERT INTO family_members
+               (id, fullName, age, education, relation, familyId, phone, jobId, socioEconomicId, isCompleted)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              newId,
               fullName,
-              age: age ? parseInt(age) : null,
+              age ? Number.parseInt(age) : null,
               education,
               relation,
-              familyId: familyByUser.id,
+              familyByUser.id,
               phone,
-              jobId: job.id,
-              socioEconomicId: socioEconomic.id,
-              isCompleted: true,
-            },
-          });
+              job.id,
+              socioEconomic.id,
+              true,
+            ],
+          );
+          familyMember = {
+            id: newId,
+            fullName,
+            age: age ? Number.parseInt(age) : null,
+            education,
+            relation,
+            familyId: familyByUser.id,
+            phone,
+            jobId: job.id,
+            socioEconomicId: socioEconomic.id,
+            isCompleted: true,
+          };
         }
       } else if (type === "ayah") {
         let socioEconomicId;
 
         if (sameSocioEconomic) {
-          const ibu = await prisma.familyMember.findFirst({
-            where: {
-              familyId: familyByUser.id,
-              relation: "IBU",
-            },
-            select: { socioEconomicId: true },
-          });
+          const [ibuRows] = await pool.query(
+            "SELECT socioEconomicId FROM family_members WHERE familyId = ? AND relation = 'IBU' LIMIT 1",
+            [familyByUser.id],
+          );
+          const ibu = ibuRows[0];
 
           if (!ibu || !ibu.socioEconomicId) {
             results.push({
@@ -431,27 +476,33 @@ export const createFamilyMember = async (req, res) => {
 
           socioEconomicId = ibu.socioEconomicId;
         } else {
-          socioEconomic = await prisma.socioEconomic.create({
-            data: {
-              residenceStatus,
-              address,
-              childrenCount,
-              underFiveCount,
-              familyIncomeLevel,
-            },
-          });
+          const [seResult] = await pool.query(
+            "INSERT INTO socio_economic (residenceStatus, address, childrenCount, underFiveCount, familyIncomeLevel) VALUES (?, ?, ?, ?, ?)",
+            [residenceStatus, address, childrenCount, underFiveCount, familyIncomeLevel],
+          );
+          socioEconomic = {
+            id: seResult.insertId,
+            residenceStatus,
+            address,
+            childrenCount,
+            underFiveCount,
+            familyIncomeLevel,
+          };
           socioEconomicId = socioEconomic.id;
         }
 
         if (existingFamilyMember && existingFamilyMember.job) {
-          job = await prisma.job.update({
-            where: { id: existingFamilyMember.job.id },
-            data: { jobTypeId },
-          });
+          await pool.query("UPDATE jobs SET jobTypeId = ? WHERE id = ?", [
+            jobTypeId,
+            existingFamilyMember.job.id,
+          ]);
+          job = { id: existingFamilyMember.job.id, jobTypeId };
         } else {
-          job = await prisma.job.create({
-            data: { jobTypeId },
-          });
+          const [jobResult] = await pool.query(
+            "INSERT INTO jobs (jobTypeId) VALUES (?)",
+            [jobTypeId],
+          );
+          job = { id: jobResult.insertId, jobTypeId };
         }
 
         if (!job || !job.id) {
@@ -460,34 +511,66 @@ export const createFamilyMember = async (req, res) => {
         }
 
         if (existingFamilyMember) {
-          familyMember = await prisma.familyMember.update({
-            where: { id: existingFamilyMember.id },
-            data: {
+          await pool.query(
+            `UPDATE family_members
+             SET fullName = ?, age = ?, education = ?, relation = ?, familyId = ?, phone = ?, jobId = ?, socioEconomicId = ?, isCompleted = ?
+             WHERE id = ?`,
+            [
               fullName,
-              age: age ? parseInt(age) : null,
+              age ? Number.parseInt(age) : null,
               education,
               relation,
-              familyId: familyByUser.id,
+              familyByUser.id,
               phone,
-              jobId: job.id,
+              job.id,
               socioEconomicId,
-              isCompleted: true,
-            },
-          });
+              true,
+              existingFamilyMember.id,
+            ],
+          );
+          familyMember = {
+            id: existingFamilyMember.id,
+            fullName,
+            age: age ? Number.parseInt(age) : null,
+            education,
+            relation,
+            familyId: familyByUser.id,
+            phone,
+            jobId: job.id,
+            socioEconomicId,
+            isCompleted: true,
+          };
         } else {
-          familyMember = await prisma.familyMember.create({
-            data: {
+          const newId = randomUUID();
+          await pool.query(
+            `INSERT INTO family_members
+               (id, fullName, age, education, relation, familyId, phone, jobId, socioEconomicId, isCompleted)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              newId,
               fullName,
-              age: age ? parseInt(age) : null,
+              age ? Number.parseInt(age) : null,
               education,
               relation,
-              familyId: familyByUser.id,
+              familyByUser.id,
               phone,
-              jobId: job.id,
+              job.id,
               socioEconomicId,
-              isCompleted: true,
-            },
-          });
+              true,
+            ],
+          );
+          familyMember = {
+            id: newId,
+            fullName,
+            age: age ? Number.parseInt(age) : null,
+            education,
+            relation,
+            familyId: familyByUser.id,
+            phone,
+            jobId: job.id,
+            socioEconomicId,
+            isCompleted: true,
+          };
         }
       } else if (type === "anak") {
         const childBirthDate = new Date(birthDate);
@@ -504,14 +587,11 @@ export const createFamilyMember = async (req, res) => {
         const heightInMeters = Number(height) / 100;
         const calculateBMI = Number(weight) / (heightInMeters * heightInMeters);
 
-        const bmiRef = await prisma.bmiReference.findFirst({
-          where: {
-            gender: gender,
-            ageYear: ageYear,
-            ageMonthFrom: { lte: ageMonthRemainder },
-            ageMonthTo: { gte: ageMonthRemainder },
-          },
-        });
+        const [bmiRefRows] = await pool.query(
+          "SELECT * FROM bmi_references WHERE gender = ? AND ageYear = ? AND ageMonthFrom <= ? AND ageMonthTo >= ? LIMIT 1",
+          [gender, ageYear, ageMonthRemainder, ageMonthRemainder],
+        );
+        const bmiRef = bmiRefRows[0];
 
         if (!bmiRef) {
           results.push({
@@ -530,9 +610,11 @@ export const createFamilyMember = async (req, res) => {
           nutritionStatusEnum = "GIZI_BAIK";
         }
 
-        const nutritionStatusRecord = await prisma.nutritionStatus.findFirst({
-          where: { status: nutritionStatusEnum },
-        });
+        const [nutritionStatusRows] = await pool.query(
+          "SELECT * FROM nutrition_status WHERE status = ? LIMIT 1",
+          [nutritionStatusEnum],
+        );
+        const nutritionStatusRecord = nutritionStatusRows[0];
 
         if (!nutritionStatusRecord) {
           results.push({
@@ -542,15 +624,11 @@ export const createFamilyMember = async (req, res) => {
           continue;
         }
 
-        parent = await prisma.familyMember.findFirst({
-          where: {
-            familyId: familyByUser.id,
-            OR: [{ relation: "IBU" }, { relation: "AYAH" }],
-          },
-          select: {
-            socioEconomicId: true,
-          },
-        });
+        const [parentRows] = await pool.query(
+          "SELECT socioEconomicId FROM family_members WHERE familyId = ? AND (relation = 'IBU' OR relation = 'AYAH') LIMIT 1",
+          [familyByUser.id],
+        );
+        parent = parentRows[0];
 
         if (!parent || !parent.socioEconomicId) {
           results.push({
@@ -561,89 +639,152 @@ export const createFamilyMember = async (req, res) => {
         }
 
         if (existingFamilyMember) {
-          familyMember = await prisma.familyMember.update({
-            where: { id: existingFamilyMember.id },
-            data: {
+          await pool.query(
+            `UPDATE family_members
+             SET fullName = ?, birthDate = ?, education = ?, gender = ?, relation = ?, familyId = ?, phone = ?, socioEconomicId = ?, isCompleted = ?
+             WHERE id = ?`,
+            [
               fullName,
-              birthDate: childBirthDate,
+              childBirthDate,
               education,
               gender,
               relation,
-              familyId: familyByUser.id,
+              familyByUser.id,
               phone,
-              socioEconomicId: parent.socioEconomicId,
-              isCompleted: true,
-            },
-          });
+              parent.socioEconomicId,
+              true,
+              existingFamilyMember.id,
+            ],
+          );
+          familyMember = {
+            id: existingFamilyMember.id,
+            fullName,
+            birthDate: childBirthDate,
+            education,
+            gender,
+            relation,
+            familyId: familyByUser.id,
+            phone,
+            socioEconomicId: parent.socioEconomicId,
+            isCompleted: true,
+          };
         } else {
-          familyMember = await prisma.familyMember.create({
-            data: {
+          const newId = randomUUID();
+          await pool.query(
+            `INSERT INTO family_members
+               (id, fullName, birthDate, education, gender, relation, familyId, phone, socioEconomicId, isCompleted)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              newId,
               fullName,
-              birthDate: childBirthDate,
+              childBirthDate,
               education,
               gender,
               relation,
-              familyId: familyByUser.id,
+              familyByUser.id,
               phone,
-              socioEconomicId: parent.socioEconomicId,
-              isCompleted: true,
-            },
-          });
+              parent.socioEconomicId,
+              true,
+            ],
+          );
+          familyMember = {
+            id: newId,
+            fullName,
+            birthDate: childBirthDate,
+            education,
+            gender,
+            relation,
+            familyId: familyByUser.id,
+            phone,
+            socioEconomicId: parent.socioEconomicId,
+            isCompleted: true,
+          };
         }
 
-        const existingStudent = await prisma.student.findUnique({
-          where: { nis },
-        });
+        const [existingStudentRows] = await pool.query(
+          "SELECT * FROM students WHERE nis = ?",
+          [nis],
+        );
+        const existingStudent = existingStudentRows[0];
 
         if (existingStudent) {
-          student = await prisma.student.update({
-            where: { nis },
-            data: {
-              schoolYear,
-              semester,
-              schoolId,
-              classId,
-              familyMemberId: familyMember.id,
-            },
-          });
+          await pool.query(
+            "UPDATE students SET schoolYear = ?, semester = ?, schoolId = ?, classId = ?, familyMemberId = ? WHERE nis = ?",
+            [schoolYear, semester, schoolId, classId, familyMember.id, nis],
+          );
+          student = {
+            id: existingStudent.id,
+            nis,
+            schoolYear,
+            semester,
+            schoolId,
+            classId,
+            familyMemberId: familyMember.id,
+          };
         } else {
-          student = await prisma.student.create({
-            data: {
-              nis,
-              schoolYear,
-              semester,
-              schoolId,
-              classId,
-              familyMemberId: familyMember.id,
-            },
-          });
+          const newStudentId = randomUUID();
+          await pool.query(
+            `INSERT INTO students (id, nis, schoolYear, semester, schoolId, classId, familyMemberId)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [newStudentId, nis, schoolYear, semester, schoolId, classId, familyMember.id],
+          );
+          student = {
+            id: newStudentId,
+            nis,
+            schoolYear,
+            semester,
+            schoolId,
+            classId,
+            familyMemberId: familyMember.id,
+          };
         }
 
-        const existingNutrition = await prisma.nutrition.findFirst({
-          where: { familyMemberId: familyMember.id },
-        });
+        const [existingNutritionRows] = await pool.query(
+          "SELECT * FROM nutritions WHERE familyMemberId = ? LIMIT 1",
+          [familyMember.id],
+        );
+        const existingNutrition = existingNutritionRows[0];
 
         if (existingNutrition) {
-          nutrition = await prisma.nutrition.update({
-            where: { id: existingNutrition.id },
-            data: {
-              height: Number(height),
-              weight: Number(weight),
-              bmi: calculateBMI,
-              nutritionStatusId: nutritionStatusRecord.id,
-            },
-          });
+          await pool.query(
+            "UPDATE nutritions SET height = ?, weight = ?, bmi = ?, nutritionStatusId = ? WHERE id = ?",
+            [
+              Number(height),
+              Number(weight),
+              calculateBMI,
+              nutritionStatusRecord.id,
+              existingNutrition.id,
+            ],
+          );
+          nutrition = {
+            id: existingNutrition.id,
+            height: Number(height),
+            weight: Number(weight),
+            bmi: calculateBMI,
+            nutritionStatusId: nutritionStatusRecord.id,
+          };
         } else {
-          nutrition = await prisma.nutrition.create({
-            data: {
-              height: Number(height),
-              weight: Number(weight),
-              bmi: calculateBMI,
-              nutritionStatusId: nutritionStatusRecord.id,
-              familyMemberId: familyMember.id,
-              createdBy: user.id,
-            },
-          });
+          const [nutritionResult] = await pool.query(
+            `INSERT INTO nutritions (height, weight, bmi, nutritionStatusId, familyMemberId, createdBy)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              Number(height),
+              Number(weight),
+              calculateBMI,
+              nutritionStatusRecord.id,
+              familyMember.id,
+              user.id,
+            ],
+          );
+          nutrition = {
+            id: nutritionResult.insertId,
+            height: Number(height),
+            weight: Number(weight),
+            bmi: calculateBMI,
+            nutritionStatusId: nutritionStatusRecord.id,
+            familyMemberId: familyMember.id,
+            createdBy: user.id,
+          };
         }
       } else {
         results.push({ error: "Invalid type", member });
@@ -655,11 +796,7 @@ export const createFamilyMember = async (req, res) => {
 
     const errors = results.filter((r) => r.error);
     if (errors.length > 0) {
-      return errorResponse(
-        res,
-        { results, errors },
-        errors[0].error,
-      );
+      return errorResponse(res, { results, errors }, errors[0].error);
     }
 
     return successResponse(
