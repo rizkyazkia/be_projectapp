@@ -15,6 +15,7 @@ import {
   getRecomendations,
   createRecommendation,
   changeStatusToProcessed,
+  getResponseParent,
 } from "../RecommendationController.js";
 
 function mockRes() {
@@ -446,6 +447,101 @@ describe("changeStatusToProcessed", () => {
     const [data] = res.json.mock.calls[0];
     expect(data.status).toBe("error");
     expect(data.message).toBe("Gagal memasukan ke dalam antrian proses");
+    expect(data.error).toBe("connection lost");
+  });
+});
+
+describe("getResponseParent", () => {
+  it("scopes answers to the response matching the requested quesioner (full bug fix)", async () => {
+    const req = {
+      body: { userId: 42 },
+      query: { page: "0", limit: "10", search: "" },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fam-1" }], []]) // family lookup
+      .mockResolvedValueOnce([[{ id: "fm-1" }], []]) // familyMember (IBU/AYAH) lookup
+      .mockResolvedValueOnce([
+        [
+          { id: "resp-other", quisionerId: 99 },
+          { id: "resp-match", quisionerId: 42 },
+        ],
+        [],
+      ]) // responses for this family member (array, unscoped fetch preserved)
+      .mockResolvedValueOnce([[{ id: 1, quesioner_id: 42, title: "Q1", type: "SCALE" }], []]) // questions
+      .mockResolvedValueOnce([[{ id: 10, question_id: 1, title: "Opt A", score: 1 }], []]) // options
+      .mockResolvedValueOnce([[{ count: 1 }], []]) // answers count, scoped
+      .mockResolvedValueOnce([[{ id: 100, responseId: "resp-match", questionId: 1 }], []]); // answers, scoped
+
+    await getResponseParent(req, res);
+
+    expect(pool.query.mock.calls[0][1]).toEqual([42]);
+    expect(pool.query.mock.calls[3][0]).toContain("quesioner_id = ?");
+    expect(pool.query.mock.calls[3][1]).toEqual([42, "%%"]);
+
+    const countCall = pool.query.mock.calls[5];
+    expect(countCall[0]).toContain("responseId = ?");
+    expect(countCall[0]).toContain("questionId IN (?)");
+    expect(countCall[1]).toEqual(["resp-match", [1]]);
+
+    const answersCall = pool.query.mock.calls[6];
+    expect(answersCall[1]).toEqual(["resp-match", [1], 10, 0]);
+
+    expect(res.status).not.toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.data.questions[0].options).toEqual([{ id: 10, title: "Opt A", score: 1 }]);
+    expect(data.data.answers).toEqual([{ id: 100, responseId: "resp-match", questionId: 1 }]);
+  });
+
+  it("returns empty answers/totalRows=0 without querying when no response matches the quesioner", async () => {
+    const req = { body: { userId: 7 }, query: {} };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fam-1" }], []])
+      .mockResolvedValueOnce([[{ id: "fm-1" }], []])
+      .mockResolvedValueOnce([[{ id: "resp-other", quisionerId: 99 }], []]) // no match for quesionerId 7
+      .mockResolvedValueOnce([[{ id: 1, quesioner_id: 7, title: "Q1", type: "SCALE" }], []])
+      .mockResolvedValueOnce([[], []]); // options (empty, guarded)
+
+    await getResponseParent(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(5); // no count/answers queries executed
+    const [data] = res.json.mock.calls[0];
+    expect(data.data.totalRows).toBe(0);
+    expect(data.data.answers).toEqual([]);
+  });
+
+  it("returns the guard-clause response (actual HTTP 500) when no family is found", async () => {
+    const req = { body: { userId: 1 }, query: {} };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]); // no family
+
+    await getResponseParent(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.error).toBe(404);
+    expect(data.message).toBe("Family not found");
+  });
+
+  it("returns a 500 error response when the family lookup query rejects (genuine catch-block path)", async () => {
+    const req = { body: { userId: 1 }, query: {} };
+    const res = mockRes();
+
+    const dbError = new Error("connection lost");
+    pool.query.mockRejectedValueOnce(dbError);
+
+    await getResponseParent(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("error");
+    expect(data.message).toBe("Failed to get response");
     expect(data.error).toBe("connection lost");
   });
 });

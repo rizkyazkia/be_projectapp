@@ -328,96 +328,88 @@ export const changeStatusToProcessed = async (req, res) => {
 export const getResponseParent = async (req, res) => {
   try {
     const { userId } = req.body;
+    const quesionerId = userId;
 
     const page = parseInt(req.query.page) || 0;
     const limit = parseInt(req.query.limit) || 10;
     const search = req.query.search || "";
     const offset = limit * page;
 
-    const family = await prisma.family.findFirst({
-      where: {
-        userId,
-      },
-    });
+    const [familyRows] = await pool.query(
+      "SELECT id FROM families WHERE userId = ? LIMIT 1",
+      [userId],
+    );
+    const family = familyRows[0];
 
     if (!family) {
       return errorResponse(res, 404, "Family not found");
     }
 
-    const familyMember = await prisma.familyMember.findFirst({
-      where: {
-        familyId: family.id,
-        OR: [
-          {
-            relation: "IBU",
-          },
-          {
-            relation: "AYAH",
-          },
-        ],
-      },
-    });
+    const [familyMemberRows] = await pool.query(
+      `SELECT id FROM family_members
+       WHERE familyId = ? AND (relation = 'IBU' OR relation = 'AYAH')
+       LIMIT 1`,
+      [family.id],
+    );
+    const familyMember = familyMemberRows[0];
 
     if (!familyMember) {
       return errorResponse(res, 404, "Family member not found");
     }
 
-    const response = await prisma.response.findMany({
-      where: {
-        familyMemberId: familyMember.id,
-      },
-      include: {
-        answers: true,
-      },
-    });
+    const [responses] = await pool.query(
+      "SELECT id, quisionerId FROM responses WHERE familyMemberId = ?",
+      [familyMember.id],
+    );
 
-    const questions = await prisma.question.findMany({
-      where: {
-        quesioner_id: id,
-        title: {
-          contains: search,
-        },
-      },
-      select: {
-        id: true,
-        quesioner_id: true,
-        title: true,
-        type: true,
-        options: {
-          select: {
-            id: true,
-            title: true,
-            score: true,
-          },
-        },
-      },
-    });
+    const [questions] = await pool.query(
+      `SELECT id, quesioner_id, title, type FROM questions WHERE quesioner_id = ? AND title LIKE ?`,
+      [quesionerId, `%${search}%`],
+    );
 
     const questionIds = questions.map((q) => q.id);
+    const optionsByQuestion = new Map();
+    if (questionIds.length > 0) {
+      const [optionRows] = await pool.query(
+        "SELECT id, question_id, title, score FROM options WHERE question_id IN (?)",
+        [questionIds],
+      );
+      for (const o of optionRows) {
+        const list = optionsByQuestion.get(o.question_id) || [];
+        list.push({ id: o.id, title: o.title, score: o.score });
+        optionsByQuestion.set(o.question_id, list);
+      }
+    }
+    const questionsWithOptions = questions.map((q) => ({
+      id: q.id,
+      quesioner_id: q.quesioner_id,
+      title: q.title,
+      type: q.type,
+      options: optionsByQuestion.get(q.id) || [],
+    }));
 
-    const totalRows = await prisma.answer.count({
-      where: {
-        responseId: response.id,
-        questionId: {
-          in: questionIds,
-        },
-      },
-    });
+    // The response actually relevant to this quesioner (fixes the latent
+    // un-scoped-answers bug that shipped alongside the `id` ReferenceError).
+    const targetResponse = responses.find((r) => r.quisionerId === quesionerId);
+
+    let totalRows = 0;
+    let answers = [];
+    if (targetResponse && questionIds.length > 0) {
+      const [countRows] = await pool.query(
+        "SELECT COUNT(*) AS count FROM answers WHERE responseId = ? AND questionId IN (?)",
+        [targetResponse.id, questionIds],
+      );
+      totalRows = countRows[0].count;
+
+      const [answerRows] = await pool.query(
+        `SELECT * FROM answers WHERE responseId = ? AND questionId IN (?)
+         ORDER BY id ASC LIMIT ? OFFSET ?`,
+        [targetResponse.id, questionIds, limit, offset],
+      );
+      answers = answerRows;
+    }
 
     const totalPage = Math.ceil(totalRows / limit);
-    const answers = await prisma.answer.findMany({
-      where: {
-        responseId: response.id,
-        questionId: {
-          in: questionIds,
-        },
-      },
-      skip: offset,
-      take: limit,
-      orderBy: {
-        id: "asc",
-      },
-    });
 
     return successResponse(
       res,
@@ -426,7 +418,7 @@ export const getResponseParent = async (req, res) => {
         totalPage,
         page,
         limit,
-        questions,
+        questions: questionsWithOptions,
         answers,
       },
       "Berhasil mendapatkan data",
