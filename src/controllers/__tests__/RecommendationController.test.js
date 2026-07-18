@@ -11,7 +11,11 @@ vi.mock("../NotificationController.js", () => ({
 import pool from "../../config/db.js";
 import { randomUUID } from "node:crypto";
 import { createNotification } from "../NotificationController.js";
-import { getRecomendations, createRecommendation } from "../RecommendationController.js";
+import {
+  getRecomendations,
+  createRecommendation,
+  changeStatusToProcessed,
+} from "../RecommendationController.js";
 
 function mockRes() {
   const res = {};
@@ -387,6 +391,61 @@ describe("createRecommendation", () => {
     const [data] = res.json.mock.calls[0];
     expect(data.status).toBe("error");
     expect(data.message).toBe("Failed to create recommendation");
+    expect(data.error).toBe("connection lost");
+  });
+});
+
+describe("changeStatusToProcessed", () => {
+  it("updates status and re-selects the row", async () => {
+    const req = { params: { id: "rec-1" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // UPDATE
+      .mockResolvedValueOnce([[{ id: "rec-1", status: "PROCESSED" }], []]); // re-select
+
+    await changeStatusToProcessed(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("UPDATE recommendations SET status = ? WHERE id = ?"),
+      ["PROCESSED", "rec-1"],
+    );
+    expect(pool.query.mock.calls[0][0]).not.toContain("updatedAt");
+    expect(res.status).not.toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.data).toEqual({ id: "rec-1", status: "PROCESSED" });
+    expect(data.message).toBe("Berhasil dimasukan ke dalam antrian proses");
+  });
+
+  it("errors when the recommendation id does not exist (affectedRows === 0)", async () => {
+    const req = { params: { id: "missing" } };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([{ affectedRows: 0 }]);
+
+    await changeStatusToProcessed(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1); // no re-select attempted
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.message).toBe("Gagal memasukan ke dalam antrian proses");
+  });
+
+  it("returns a 500 error response when the UPDATE query rejects", async () => {
+    const req = { params: { id: "rec-1" } };
+    const res = mockRes();
+
+    const dbError = new Error("connection lost");
+    pool.query.mockRejectedValueOnce(dbError);
+
+    await changeStatusToProcessed(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("error");
+    expect(data.message).toBe("Gagal memasukan ke dalam antrian proses");
     expect(data.error).toBe("connection lost");
   });
 });

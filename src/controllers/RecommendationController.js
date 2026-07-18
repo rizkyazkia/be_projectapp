@@ -301,17 +301,23 @@ export const changeStatusToProcessed = async (req, res) => {
   const { id } = req.params;
 
   try {
-    const data = await prisma.recommendation.update({
-      where: {
-        id,
-      },
-      data: {
-        status: "PROCESSED",
-      },
-    });
+    const [result] = await pool.query(
+      "UPDATE recommendations SET status = ? WHERE id = ?",
+      ["PROCESSED", id],
+    );
+
+    if (result.affectedRows === 0) {
+      throw new Error(`No 'Recommendation' record(s) found for id ${id}.`);
+    }
+
+    const [rows] = await pool.query(
+      "SELECT * FROM recommendations WHERE id = ? LIMIT 1",
+      [id],
+    );
+
     return successResponse(
       res,
-      data,
+      rows[0],
       "Berhasil dimasukan ke dalam antrian proses",
     );
   } catch (error) {
