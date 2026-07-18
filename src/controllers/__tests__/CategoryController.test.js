@@ -96,4 +96,19 @@ describe("getCategory", () => {
       })
     );
   });
+
+  it("returns a 500 error when the count query fails", async () => {
+    const req = { query: {} };
+    const res = mockRes();
+    pool.query.mockRejectedValueOnce(new Error("database unavailable"));
+
+    await getCategory(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Internal server error",
+      error: "database unavailable",
+    });
+  });
 });

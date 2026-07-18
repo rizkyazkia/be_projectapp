@@ -40,6 +40,21 @@ describe("getCities", () => {
       data: [{ id: 1, name: "Bandung" }],
     });
   });
+
+  it("returns a 500 error when the query fails", async () => {
+    const req = {};
+    const res = mockRes();
+    pool.query.mockRejectedValueOnce(new Error("connection lost"));
+
+    await getCities(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Failed to retrieve cities",
+      error: "connection lost",
+    });
+  });
 });
 
 describe("getCitiesByProvince", () => {
@@ -62,6 +77,21 @@ describe("getCitiesByProvince", () => {
       status: "success",
       message: "Berhasil mendapatkan data kota berdasarkan provinsi",
       data: [{ id: 1, name: "Bandung", province_id: 3 }],
+    });
+  });
+
+  it("returns a 500 error when the query fails", async () => {
+    const req = { params: { id: "3" } };
+    const res = mockRes();
+    pool.query.mockRejectedValueOnce(new Error("database error"));
+
+    await getCitiesByProvince(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Gagal mendapatkan data kota berdasarkan provinsi",
+      error: "database error",
     });
   });
 });
@@ -94,6 +124,21 @@ describe("createCity", () => {
       status: "success",
       message: "Berhasil menambahkan kota baru",
       data: { id: 7, name: "Bandung", province_id: 3 },
+    });
+  });
+
+  it("returns a 500 error when the insert query fails", async () => {
+    const req = { params: { id: "3" }, body: { name: "Bandung" } };
+    const res = mockRes();
+    pool.query.mockRejectedValueOnce(new Error("constraint violation"));
+
+    await createCity(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Gagal menambahkan kota baru",
+      error: "constraint violation",
     });
   });
 });

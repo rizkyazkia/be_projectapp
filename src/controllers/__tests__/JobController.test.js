@@ -49,6 +49,21 @@ describe("getJobs", () => {
       })
     );
   });
+
+  it("returns a 500 error when the query fails", async () => {
+    const req = {};
+    const res = mockRes();
+    pool.query.mockRejectedValueOnce(new Error("connection timeout"));
+
+    await getJobs(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Failed to retrieve jobs",
+      error: "connection timeout",
+    });
+  });
 });
 
 describe("getJobTypes", () => {
@@ -70,6 +85,21 @@ describe("getJobTypes", () => {
       status: "success",
       message: "Job types retrieved successfully",
       data: [{ id: 1, name: "Buruh", type: "BURUH" }],
+    });
+  });
+
+  it("returns a 500 error when the query fails", async () => {
+    const req = {};
+    const res = mockRes();
+    pool.query.mockRejectedValueOnce(new Error("database disconnect"));
+
+    await getJobTypes(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Failed to retrieve job types",
+      error: "database disconnect",
     });
   });
 });
