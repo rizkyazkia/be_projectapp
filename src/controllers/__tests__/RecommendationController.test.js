@@ -19,6 +19,8 @@ import {
   getResponseInstitution,
   createIntervention,
   getSingleRecommendation,
+  getInterventionsBelongToInstitution,
+  getInterventionsBelongToFamily,
 } from "../RecommendationController.js";
 
 function mockRes() {
@@ -800,6 +802,144 @@ describe("getSingleRecommendation", () => {
     pool.query.mockRejectedValueOnce(dbError);
 
     await getSingleRecommendation(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("error");
+    expect(data.message).toBe("Failed to get response");
+    expect(data.error).toBe("connection lost");
+  });
+});
+
+describe("getInterventionsBelongToInstitution", () => {
+  it("dedupes to one intervention per recommendation via ROW_NUMBER, applies OFFSET with no LIMIT, and preserves the length-based totalPages bug", async () => {
+    const req = {
+      user: { id: "user-health-1" },
+      query: { page: "0", limit: "10", keyword: "" },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ institution_id: 5 }], []]) // userInstitution lookup
+      .mockResolvedValueOnce([
+        [
+          {
+            iv_id: "iv-1", iv_forType: "PARENT", iv_notes: "n", iv_options: JSON.stringify({ a: 1 }), iv_createdAt: new Date("2026-01-02"),
+            r_id: "rec-1", r_status: "COMPLETED", r_createdAt: new Date("2026-01-01"),
+            st_nis: "12345", cl_id: 9, cl_name: "5A",
+            fm_fullName: "Budi", fm_birthDate: new Date("2015-01-01"), fm_gender: "L",
+            se_address: "Jl. A", of2_id: "fam-2",
+            subu_i_id: 3, subu_i_name: "SD Negeri 1",
+            vi_name: "Puskesmas A", vi_address: "Jl. B", vi_phone: "0800", vi_email: "p@x.com",
+            vu_username: "petugas1",
+          },
+        ],
+        [],
+      ]) // main windowed query
+      .mockResolvedValueOnce([[{ familyId: "fam-2", id: "sib-1", fullName: "Ani" }], []]); // siblings batch
+
+    await getInterventionsBelongToInstitution(req, res);
+
+    expect(pool.query.mock.calls[1][0]).toContain("ROW_NUMBER() OVER (PARTITION BY iv.recommendationId ORDER BY iv.createdAt DESC)");
+    expect(pool.query.mock.calls[1][0]).toContain("LIMIT 18446744073709551615 OFFSET ?");
+    expect(pool.query.mock.calls[1][1]).toEqual([5, 0]);
+    expect(pool.query.mock.calls[2][1]).toEqual([["fam-2"]]);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const [data] = res.json.mock.calls[0];
+    expect(data.data.totalPages).toBe(Math.ceil(1 / 10)); // length-based, not a real count
+    expect(data.data.interventions[0].options).toEqual({ a: 1 });
+    expect(
+      data.data.interventions[0].recommendation.student.familyMember.family.user.family.familyMember,
+    ).toEqual([{ fullName: "Ani" }]);
+  });
+
+  it("appends the keyword LIKE filter only when keyword is non-empty", async () => {
+    const req = { user: { id: "user-health-1" }, query: { keyword: "Budi" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ institution_id: 5 }], []])
+      .mockResolvedValueOnce([[], []]);
+
+    await getInterventionsBelongToInstitution(req, res);
+
+    expect(pool.query.mock.calls[1][0]).toContain("fm.fullName LIKE ?");
+    expect(pool.query.mock.calls[1][1]).toEqual([5, "%Budi%", 0]);
+  });
+
+  it("throws when the requesting user does not exist", async () => {
+    const req = { user: { id: "ghost" }, query: {} };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]); // no user row
+
+    await getInterventionsBelongToInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+
+  it("returns a 500 error response when a query rejects (genuine catch-block path)", async () => {
+    const req = { user: { id: "user-health-1" }, query: {} };
+    const res = mockRes();
+
+    const dbError = new Error("connection lost");
+    pool.query.mockRejectedValueOnce(dbError);
+
+    await getInterventionsBelongToInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("error");
+    expect(data.message).toBe("Failed to get response");
+    expect(data.error).toBe("connection lost");
+  });
+});
+
+describe("getInterventionsBelongToFamily", () => {
+  it("orders by the joined recommendation's updatedAt (not the intervention's own createdAt) and preserves the un-divided totalPages bug", async () => {
+    const req = { user: { id: "user-parent-1" }, query: { page: "0", limit: "10", keyword: "" } };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([
+      [
+        {
+          iv_id: "iv-1", iv_forType: "PARENT", iv_notes: null, iv_options: JSON.stringify({ b: 2 }), iv_createdAt: new Date("2026-01-01"),
+          r_id: "rec-1", r_status: "COMPLETED", r_createdAt: new Date("2025-12-01"),
+          st_nis: "999", cl_id: 4, cl_name: "3B",
+          fm_fullName: "Sari", fm_birthDate: new Date("2016-01-01"), fm_gender: "P",
+          se_address: "Jl. C", of2_id: null,
+          subu_i_id: 2, subu_i_name: "SD Negeri 2",
+          vi_name: "Puskesmas B", vi_address: "Jl. D", vi_phone: "0801", vi_email: "b@x.com",
+          vu_username: "petugas2",
+        },
+      ],
+      [],
+    ]);
+
+    await getInterventionsBelongToFamily(req, res);
+
+    expect(pool.query.mock.calls[0][0]).toContain("ORDER BY r.updatedAt DESC");
+    expect(pool.query.mock.calls[0][0]).toContain("iv.forType = 'PARENT'");
+    expect(pool.query.mock.calls[0][0]).toContain("LIMIT 18446744073709551615 OFFSET ?");
+
+    const [data] = res.json.mock.calls[0];
+    expect(data.data.totalPages).toBe(1); // interventions.length, NOT Math.ceil(length/limit)
+    expect(data.data.interventions[0].recommendation.student.familyMember.family.user.family).toBeNull();
+    expect(data.data.interventions[0].options).toEqual({ b: 2 });
+  });
+
+  it("returns a 500 error response when a query rejects (genuine catch-block path)", async () => {
+    const req = { user: { id: "user-parent-1" }, query: {} };
+    const res = mockRes();
+
+    const dbError = new Error("connection lost");
+    pool.query.mockRejectedValueOnce(dbError);
+
+    await getInterventionsBelongToFamily(req, res);
 
     expect(pool.query).toHaveBeenCalledTimes(1);
     expect(res.status).toHaveBeenCalledWith(500);

@@ -724,137 +724,116 @@ export const getInterventionsBelongToInstitution = async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const keyword = req.query.keyword ?? "";
     const skip = limit * page;
-    const userInstitution = await prisma.user.findUnique({
-      where: {
-        id: user.id,
-      },
-      select: {
-        institution: {
-          select: {
-            id: true,
-          },
-        },
-      },
-    });
+
+    const [userRows] = await pool.query(
+      `SELECT u.id AS user_id, i.id AS institution_id
+       FROM users u
+       LEFT JOIN institutions i ON i.user_id = u.id
+       WHERE u.id = ? LIMIT 1`,
+      [user.id],
+    );
+    const userInstitution = userRows[0];
     if (!userInstitution) {
       throw new Error("user not found");
     }
-    const interventions = await prisma.intervention.findMany({
-      where: {
-        user: {
-          institution: {
-            id: userInstitution.institution.id,
+    // NOTE: if the user exists but has no institution, userInstitution.institution_id
+    // is null and the WHERE below naturally matches nothing (Prisma's equivalent threw
+    // a TypeError here instead — a separate pre-existing bug not covered by this task).
+
+    const keywordParams = keyword !== "" ? [`%${keyword}%`] : [];
+    const keywordSql = keyword !== "" ? "AND fm.fullName LIKE ?" : "";
+
+    const [rows] = await pool.query(
+      `SELECT * FROM (
+        SELECT
+          iv.id AS iv_id, iv.forType AS iv_forType, iv.notes AS iv_notes, iv.options AS iv_options, iv.createdAt AS iv_createdAt,
+          iv.recommendationId AS recommendationId,
+          r.id AS r_id, r.status AS r_status, r.createdAt AS r_createdAt,
+          st.nis AS st_nis,
+          cl.id AS cl_id, cl.name AS cl_name,
+          fm.fullName AS fm_fullName, fm.birthDate AS fm_birthDate, fm.gender AS fm_gender,
+          se.address AS se_address,
+          of2.id AS of2_id,
+          subu_i.id AS subu_i_id, subu_i.name AS subu_i_name,
+          vi.name AS vi_name, vi.address AS vi_address, vi.phone AS vi_phone, vi.email AS vi_email,
+          vu.username AS vu_username,
+          ROW_NUMBER() OVER (PARTITION BY iv.recommendationId ORDER BY iv.createdAt DESC) AS rn
+        FROM interventions iv
+        JOIN users vu ON vu.id = iv.user_id
+        JOIN institutions vi ON vi.user_id = vu.id
+        LEFT JOIN recommendations r ON r.id = iv.recommendationId
+        LEFT JOIN students st ON st.id = r.studentId
+        LEFT JOIN classes cl ON cl.id = st.classId
+        LEFT JOIN family_members fm ON fm.id = st.familyMemberId
+        LEFT JOIN socio_economic se ON se.id = fm.socioEconomicId
+        LEFT JOIN families f ON f.id = fm.familyId
+        LEFT JOIN users ofu ON ofu.id = f.userId
+        LEFT JOIN families of2 ON of2.userId = ofu.id
+        LEFT JOIN users subu ON subu.id = r.submittedById
+        LEFT JOIN institutions subu_i ON subu_i.user_id = subu.id
+        WHERE vi.id = ? ${keywordSql}
+      ) t
+      WHERE t.rn = 1
+      ORDER BY t.iv_createdAt DESC
+      LIMIT 18446744073709551615 OFFSET ?`,
+      [userInstitution.institution_id, ...keywordParams, skip],
+    );
+
+    const familyIds = [...new Set(rows.filter((r) => r.of2_id).map((r) => r.of2_id))];
+    let siblingsByFamily = new Map();
+    if (familyIds.length > 0) {
+      const [siblingRows] = await pool.query(
+        "SELECT familyId, id, fullName FROM family_members WHERE familyId IN (?)",
+        [familyIds],
+      );
+      for (const s of siblingRows) {
+        const list = siblingsByFamily.get(s.familyId) || [];
+        list.push({ fullName: s.fullName });
+        siblingsByFamily.set(s.familyId, list);
+      }
+    }
+
+    const totalPages = Math.ceil(rows.length / limit);
+
+    const interventions = rows.map((row) => ({
+      recommendation: {
+        student: {
+          nis: row.st_nis,
+          class: row.cl_id ? { name: row.cl_name } : null,
+          familyMember: {
+            fullName: row.fm_fullName,
+            birthDate: row.fm_birthDate,
+            gender: row.fm_gender,
+            SocioEconomic: row.se_address !== null ? { address: row.se_address } : null,
+            family: {
+              user: {
+                family: row.of2_id
+                  ? { familyMember: siblingsByFamily.get(row.of2_id) || [] }
+                  : null,
+              },
+            },
           },
         },
-        ...(keyword !== "" && {
-          recommendation: {
-            student: {
-              familyMember: {
-                fullName: {
-                  contains: keyword,
-                },
-              },
-            },
-          },
-        }),
+        id: row.r_id,
+        status: row.r_status,
+        createdAt: row.r_createdAt,
+        submittedBy: { institution: row.subu_i_id ? { id: row.subu_i_id, name: row.subu_i_name } : null },
       },
-      distinct: ["recommendationId"],
-      select: {
-        recommendation: {
-          select: {
-            student: {
-              select: {
-                nis: true,
-                class: {
-                  select: {
-                    name: true,
-                  },
-                },
-                familyMember: {
-                  select: {
-                    fullName: true,
-                    birthDate: true,
-                    gender: true,
-                    SocioEconomic: {
-                      select: {
-                        address: true,
-                      },
-                    },
-                    family: {
-                      select: {
-                        user: {
-                          select: {
-                            family: {
-                              select: {
-                                familyMember: {
-                                  select: {
-                                    fullName: true,
-                                  },
-                                },
-                              },
-                            },
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-            id: true,
-            status: true,
-            createdAt: true,
-            submittedBy: {
-              select: {
-                institution: {
-                  select: {
-                    id: true,
-                    name: true,
-                  },
-                },
-              },
-            },
-          },
-        },
-        id: true,
-        forType: true,
-        notes: true,
-        options: true,
-        createdAt: true,
-        user: {
-          select: {
-            institution: {
-              select: {
-                name: true,
-                address: true,
-                phone: true,
-                email: true,
-              },
-            },
-            username: true,
-          },
-        },
+      id: row.iv_id,
+      forType: row.iv_forType,
+      notes: row.iv_notes,
+      options: JSON.parse(row.iv_options),
+      createdAt: row.iv_createdAt,
+      user: {
+        institution: { name: row.vi_name, address: row.vi_address, phone: row.vi_phone, email: row.vi_email },
+        username: row.vu_username,
       },
-      skip,
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
-    const totalPages = Math.ceil(interventions.length / limit);
+    }));
 
     res.status(200).json({
       status: "Success",
       message: "Interventions Belongs to Institution fetched",
-      data: {
-        totalPages,
-        skip,
-        page,
-        limit,
-        interventions: interventions.map((val) => ({
-          ...val,
-          options: JSON.parse(val.options),
-        })),
-      },
+      data: { totalPages, skip, page, limit, interventions },
     });
   } catch (err) {
     console.log({ err });
@@ -872,128 +851,96 @@ export const getInterventionsBelongToFamily = async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const keyword = req.query.keyword ?? "";
     const skip = limit * page;
-    const interventions = await prisma.intervention.findMany({
-      where: {
-        recommendation: {
-          student: {
-            familyMember: {
-              family: {
-                userId: user.id,
+
+    const keywordParams = keyword !== "" ? [`%${keyword}%`] : [];
+    const keywordSql = keyword !== "" ? "AND fm.fullName LIKE ?" : "";
+
+    const [rows] = await pool.query(
+      `SELECT
+        iv.id AS iv_id, iv.forType AS iv_forType, iv.notes AS iv_notes, iv.options AS iv_options, iv.createdAt AS iv_createdAt,
+        r.id AS r_id, r.status AS r_status, r.createdAt AS r_createdAt,
+        st.nis AS st_nis,
+        cl.id AS cl_id, cl.name AS cl_name,
+        fm.fullName AS fm_fullName, fm.birthDate AS fm_birthDate, fm.gender AS fm_gender,
+        se.address AS se_address,
+        of2.id AS of2_id,
+        subu_i.id AS subu_i_id, subu_i.name AS subu_i_name,
+        vi.name AS vi_name, vi.address AS vi_address, vi.phone AS vi_phone, vi.email AS vi_email,
+        vu.username AS vu_username
+      FROM interventions iv
+      JOIN users vu ON vu.id = iv.user_id
+      LEFT JOIN institutions vi ON vi.user_id = vu.id
+      LEFT JOIN recommendations r ON r.id = iv.recommendationId
+      LEFT JOIN students st ON st.id = r.studentId
+      LEFT JOIN classes cl ON cl.id = st.classId
+      LEFT JOIN family_members fm ON fm.id = st.familyMemberId
+      LEFT JOIN socio_economic se ON se.id = fm.socioEconomicId
+      LEFT JOIN families f ON f.id = fm.familyId
+      LEFT JOIN users ofu ON ofu.id = f.userId
+      LEFT JOIN families of2 ON of2.userId = ofu.id
+      LEFT JOIN users subu ON subu.id = r.submittedById
+      LEFT JOIN institutions subu_i ON subu_i.user_id = subu.id
+      WHERE f.userId = ? AND iv.forType = 'PARENT' ${keywordSql}
+      ORDER BY r.updatedAt DESC
+      LIMIT 18446744073709551615 OFFSET ?`,
+      [user.id, ...keywordParams, skip],
+    );
+
+    const familyIds = [...new Set(rows.filter((r) => r.of2_id).map((r) => r.of2_id))];
+    let siblingsByFamily = new Map();
+    if (familyIds.length > 0) {
+      const [siblingRows] = await pool.query(
+        "SELECT familyId, id, fullName FROM family_members WHERE familyId IN (?)",
+        [familyIds],
+      );
+      for (const s of siblingRows) {
+        const list = siblingsByFamily.get(s.familyId) || [];
+        list.push({ fullName: s.fullName });
+        siblingsByFamily.set(s.familyId, list);
+      }
+    }
+
+    const totalPages = rows.length;
+
+    const interventions = rows.map((row) => ({
+      recommendation: {
+        student: {
+          nis: row.st_nis,
+          class: row.cl_id ? { name: row.cl_name } : null,
+          familyMember: {
+            fullName: row.fm_fullName,
+            birthDate: row.fm_birthDate,
+            gender: row.fm_gender,
+            SocioEconomic: row.se_address !== null ? { address: row.se_address } : null,
+            family: {
+              user: {
+                family: row.of2_id
+                  ? { familyMember: siblingsByFamily.get(row.of2_id) || [] }
+                  : null,
               },
             },
           },
         },
-        ...(keyword !== "" && {
-          recommendation: {
-            student: {
-              familyMember: {
-                fullName: {
-                  contains: keyword,
-                },
-              },
-            },
-          },
-        }),
-        forType: "PARENT",
+        id: row.r_id,
+        status: row.r_status,
+        createdAt: row.r_createdAt,
+        submittedBy: { institution: row.subu_i_id ? { id: row.subu_i_id, name: row.subu_i_name } : null },
       },
-      select: {
-        recommendation: {
-          select: {
-            student: {
-              select: {
-                nis: true,
-                class: {
-                  select: {
-                    name: true,
-                  },
-                },
-                familyMember: {
-                  select: {
-                    fullName: true,
-                    birthDate: true,
-                    gender: true,
-                    SocioEconomic: {
-                      select: {
-                        address: true,
-                      },
-                    },
-                    family: {
-                      select: {
-                        user: {
-                          select: {
-                            family: {
-                              select: {
-                                familyMember: {
-                                  select: {
-                                    fullName: true,
-                                  },
-                                },
-                              },
-                            },
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-            id: true,
-            status: true,
-            createdAt: true,
-            submittedBy: {
-              select: {
-                institution: {
-                  select: {
-                    id: true,
-                    name: true,
-                  },
-                },
-              },
-            },
-          },
-        },
-        id: true,
-        forType: true,
-        notes: true,
-        options: true,
-        createdAt: true,
-        user: {
-          select: {
-            institution: {
-              select: {
-                name: true,
-                email: true,
-                address: true,
-                phone: true,
-              },
-            },
-            username: true,
-          },
-        },
+      id: row.iv_id,
+      forType: row.iv_forType,
+      notes: row.iv_notes,
+      options: JSON.parse(row.iv_options),
+      createdAt: row.iv_createdAt,
+      user: {
+        institution: { name: row.vi_name, email: row.vi_email, address: row.vi_address, phone: row.vi_phone },
+        username: row.vu_username,
       },
-      skip,
-      orderBy: {
-        recommendation: {
-          updatedAt: "desc",
-        },
-      },
-    });
-    const totalPages = interventions.length;
+    }));
 
     res.status(200).json({
       status: "Success",
       message: "Intervention belongs to family fetched",
-      data: {
-        totalPages,
-        skip,
-        page,
-        limit,
-        interventions: interventions.map((val) => ({
-          ...val,
-          options: JSON.parse(val.options),
-        })),
-      },
+      data: { totalPages, skip, page, limit, interventions },
     });
   } catch (err) {
     console.log({ err });
