@@ -521,6 +521,7 @@ export const getResponseInstitution = async (req, res) => {
 };
 
 export const createIntervention = async (req, res) => {
+  let connection;
   try {
     const user = req.user;
     if (user.role !== "healthcare") {
@@ -531,60 +532,55 @@ export const createIntervention = async (req, res) => {
       throw new Error("RecommendationId is required in params");
     }
     const { content, forType, notes } = req.body;
-    const intervention = await prisma.$transaction(async (trx) => {
-      const intervention = await trx.intervention.createMany({
-        data: [
-          {
-            forType,
-            notes,
-            options: content,
-            recommendationId: id,
-            user_id: user.id,
-          },
-          {
-            forType: forType === "PARENT" ? "SCHOOL" : "PARENT",
-            notes,
-            options: content,
-            recommendationId: id,
-            user_id: user.id,
-          },
-        ],
-      });
-      await trx.recommendation.update({
-        where: {
-          id,
-        },
-        data: {
-          status: "COMPLETED",
-        },
-      });
 
-      return intervention;
-    });
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
 
-    // Notifikasi ke parent
-    const recWithParent = await prisma.recommendation.findUnique({
-      where: { id },
-      include: {
-        student: {
-          include: {
-            familyMember: {
-              include: {
-                family: { include: { user: true } },
-              },
-            },
-          },
-        },
-      },
-    });
+    const oppositeForType = forType === "PARENT" ? "SCHOOL" : "PARENT";
+    const serializedOptions = JSON.stringify(content);
+    const now = new Date();
 
-    const parentUser = recWithParent?.student?.familyMember?.family?.user;
-    if (parentUser) {
-      const puskesmasUser = await prisma.user.findUnique({
-        where: { id: user.id },
-        include: { institution: { select: { name: true } } },
-      });
-      const rawName = puskesmasUser?.institution?.name || "";
+    const [insertResult] = await connection.query(
+      `INSERT INTO interventions
+        (id, recommendationId, forType, options, notes, createdAt, user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        randomUUID(), id, forType, serializedOptions, notes, now, user.id,
+        randomUUID(), id, oppositeForType, serializedOptions, notes, now, user.id,
+      ],
+    );
+
+    await connection.query(
+      "UPDATE recommendations SET status = ? WHERE id = ?",
+      ["COMPLETED", id],
+    );
+
+    await connection.commit();
+
+    const intervention = { count: insertResult.affectedRows };
+
+    // Notifikasi ke parent (plain, non-transactional lookups after commit)
+    const [recRows] = await pool.query(
+      `SELECT r.id, fm.id AS fm_id, fm.fullName AS fm_fullName, u.id AS parent_user_id
+       FROM recommendations r
+       LEFT JOIN students st ON st.id = r.studentId
+       LEFT JOIN family_members fm ON fm.id = st.familyMemberId
+       LEFT JOIN families f ON f.id = fm.familyId
+       LEFT JOIN users u ON u.id = f.userId
+       WHERE r.id = ? LIMIT 1`,
+      [id],
+    );
+    const recWithParent = recRows[0];
+
+    if (recWithParent?.parent_user_id) {
+      const [puskesmasRows] = await pool.query(
+        `SELECT i.name AS institution_name
+         FROM users u
+         LEFT JOIN institutions i ON i.user_id = u.id
+         WHERE u.id = ? LIMIT 1`,
+        [user.id],
+      );
+      const rawName = puskesmasRows[0]?.institution_name || "";
       const puskesmasName = rawName
         ? rawName.toLowerCase().includes("puskesmas")
           ? rawName
@@ -592,9 +588,9 @@ export const createIntervention = async (req, res) => {
         : "Puskesmas";
 
       await createNotification(
-        parentUser.id,
+        recWithParent.parent_user_id,
         "Tindak Lanjut Rekomendasi",
-        `${puskesmasName} telah mengirimkan surat tindak lanjut untuk ${recWithParent.student.familyMember.fullName}. Silakan periksa halaman rekomendasi.`,
+        `${puskesmasName} telah mengirimkan surat tindak lanjut untuk ${recWithParent.fm_fullName}. Silakan periksa halaman rekomendasi.`,
         "intervention_created",
         id,
       );
@@ -606,8 +602,15 @@ export const createIntervention = async (req, res) => {
       data: intervention,
     });
   } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
     console.log(err.message);
     return errorResponse(res, err, "Failed to get response");
+  } finally {
+    if (connection) {
+      connection.release();
+    }
   }
 };
 

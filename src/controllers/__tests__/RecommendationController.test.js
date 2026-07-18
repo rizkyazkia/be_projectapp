@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../../config/db.js", () => ({
   default: { query: vi.fn(), getConnection: vi.fn() },
 }));
-vi.mock("node:crypto", () => ({ randomUUID: vi.fn(() => "rec-uuid-1") }));
+vi.mock("node:crypto", () => ({ randomUUID: vi.fn() }));
 vi.mock("../NotificationController.js", () => ({
   createNotification: vi.fn(),
 }));
@@ -17,6 +17,7 @@ import {
   changeStatusToProcessed,
   getResponseParent,
   getResponseInstitution,
+  createIntervention,
 } from "../RecommendationController.js";
 
 function mockRes() {
@@ -268,6 +269,8 @@ describe("createRecommendation", () => {
   it("creates a recommendation when studentId is omitted from the body (undefined-key guard)", async () => {
     const req = baseReq(); // no studentId in body
     const res = mockRes();
+
+    randomUUID.mockReturnValueOnce("rec-uuid-1");
 
     pool.query
       .mockResolvedValueOnce([[{ id: "st-1", familyMemberId: "fm-1", fm_fullName: "Budi" }], []]) // student lookup
@@ -622,5 +625,98 @@ describe("getResponseInstitution", () => {
     expect(data.status).toBe("error");
     expect(data.message).toBe("Failed to get response");
     expect(data.error).toBe("connection lost");
+  });
+});
+
+describe("createIntervention", () => {
+  it("bulk-inserts both intervention rows, marks the recommendation COMPLETED, commits, and notifies the parent", async () => {
+    const req = {
+      user: { id: "user-health-1", role: "healthcare" },
+      params: { id: "rec-1" },
+      body: { content: { note: "periksa gizi" }, forType: "PARENT", notes: "catatan" },
+    };
+    const res = mockRes();
+
+    randomUUID.mockReturnValueOnce("iv-uuid-1").mockReturnValueOnce("iv-uuid-2");
+
+    const mockConnection = {
+      beginTransaction: vi.fn(),
+      query: vi.fn(),
+      commit: vi.fn(),
+      rollback: vi.fn(),
+      release: vi.fn(),
+    };
+    pool.getConnection.mockResolvedValueOnce(mockConnection);
+    mockConnection.query
+      .mockResolvedValueOnce([{ affectedRows: 2 }]) // bulk INSERT
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE status
+
+    pool.query
+      .mockResolvedValueOnce([
+        [{ id: "rec-1", fm_id: "fm-1", fm_fullName: "Budi", parent_user_id: "user-parent-1" }],
+        [],
+      ]) // recommendation -> student -> familyMember -> family -> user
+      .mockResolvedValueOnce([[{ institution_name: "Kecamatan A" }], []]); // puskesmas institution name
+
+    await createIntervention(req, res);
+
+    expect(pool.getConnection).toHaveBeenCalledTimes(1);
+    expect(mockConnection.beginTransaction).toHaveBeenCalledTimes(1);
+
+    const [insertSql, insertParams] = mockConnection.query.mock.calls[0];
+    expect(insertSql).toContain("INSERT INTO interventions");
+    expect(insertParams).toEqual([
+      "iv-uuid-1", "rec-1", "PARENT", JSON.stringify({ note: "periksa gizi" }), "catatan", expect.any(Date), "user-health-1",
+      "iv-uuid-2", "rec-1", "SCHOOL", JSON.stringify({ note: "periksa gizi" }), "catatan", expect.any(Date), "user-health-1",
+    ]);
+
+    expect(mockConnection.query.mock.calls[1][0]).toContain("UPDATE recommendations SET status = ? WHERE id = ?");
+    expect(mockConnection.query.mock.calls[1][1]).toEqual(["COMPLETED", "rec-1"]);
+
+    expect(mockConnection.commit).toHaveBeenCalledTimes(1);
+    expect(mockConnection.rollback).not.toHaveBeenCalled();
+    expect(mockConnection.release).toHaveBeenCalledTimes(1);
+
+    expect(res.status).toHaveBeenCalledWith(201);
+    const [data] = res.json.mock.calls[0];
+    expect(data.status).toBe("Success");
+    expect(data.data).toEqual({ count: 2 });
+  });
+
+  it("returns the guard-clause response without opening a connection when the user is not healthcare", async () => {
+    const req = { user: { id: "u1", role: "school" }, params: { id: "rec-1" }, body: {} };
+    const res = mockRes();
+
+    await createIntervention(req, res);
+
+    expect(pool.getConnection).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.message).toBe("Failed to get response");
+  });
+
+  it("rolls back and releases the connection when the transaction fails", async () => {
+    const req = {
+      user: { id: "user-health-1", role: "healthcare" },
+      params: { id: "rec-1" },
+      body: { content: {}, forType: "PARENT", notes: null },
+    };
+    const res = mockRes();
+
+    const mockConnection = {
+      beginTransaction: vi.fn(),
+      query: vi.fn().mockRejectedValueOnce(new Error("insert failed")),
+      commit: vi.fn(),
+      rollback: vi.fn(),
+      release: vi.fn(),
+    };
+    pool.getConnection.mockResolvedValueOnce(mockConnection);
+
+    await createIntervention(req, res);
+
+    expect(mockConnection.rollback).toHaveBeenCalledTimes(1);
+    expect(mockConnection.commit).not.toHaveBeenCalled();
+    expect(mockConnection.release).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
   });
 });
