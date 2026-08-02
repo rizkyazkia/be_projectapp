@@ -368,7 +368,7 @@ describe("OptionSeeder", () => {
     expect(pool.query).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining("SELECT id FROM options WHERE title IN"),
-      [["Benar", "Salah", "1", "2", "3", "4", "0"]],
+      [["Benar", "Salah", "Tidak pernah dilakukan anak", "Tidak pernah", "0"]],
     );
     expect(pool.query).toHaveBeenNthCalledWith(
       2,
@@ -402,7 +402,7 @@ describe("OptionSeeder", () => {
   describe("getScore bucketing logic (mirrors OptionSeeder.js internals)", () => {
     const getScore = (qid, isNegative, idx) => {
       if (qid <= 15) return isNegative ? idx : 1 - idx;
-      if (qid <= 35) return isNegative ? 4 - idx : idx + 1;
+      if (qid <= 35) return isNegative ? 3 - idx : idx;
       return isNegative ? 3 - idx : idx;
     };
 
@@ -414,10 +414,10 @@ describe("OptionSeeder", () => {
     });
 
     it("computes parent-scale-range (<=35) scores for both is_negative cases", () => {
-      expect(getScore(35, false, 0)).toBe(1);
-      expect(getScore(35, false, 3)).toBe(4);
-      expect(getScore(35, true, 0)).toBe(4);
-      expect(getScore(35, true, 3)).toBe(1);
+      expect(getScore(35, false, 0)).toBe(0);
+      expect(getScore(35, false, 3)).toBe(3);
+      expect(getScore(35, true, 0)).toBe(3);
+      expect(getScore(35, true, 3)).toBe(0);
     });
 
     it("computes school-scale-range (>35) scores for both is_negative cases", () => {
@@ -433,8 +433,8 @@ describe("OptionSeeder", () => {
 
       expect(!!rowNegativeTinyint.is_negative).toBe(true);
       expect(!!rowPositiveTinyint.is_negative).toBe(false);
-      expect(getScore(rowNegativeTinyint.id, !!rowNegativeTinyint.is_negative, 0)).toBe(4);
-      expect(getScore(rowPositiveTinyint.id, !!rowPositiveTinyint.is_negative, 0)).toBe(1);
+      expect(getScore(rowNegativeTinyint.id, !!rowNegativeTinyint.is_negative, 0)).toBe(3);
+      expect(getScore(rowPositiveTinyint.id, !!rowPositiveTinyint.is_negative, 0)).toBe(0);
     });
   });
 });
