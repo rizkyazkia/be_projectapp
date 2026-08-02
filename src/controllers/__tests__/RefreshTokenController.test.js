@@ -68,7 +68,7 @@ describe("refreshToken", () => {
         role: "admin",
       },
       "access-secret",
-      { expiresIn: "15m" }
+      { expiresIn: 1800 }
     );
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith({

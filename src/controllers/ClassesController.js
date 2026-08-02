@@ -24,17 +24,21 @@ export const getClasses = async (req, res) => {
   const offset = limit * page;
 
   try {
+    const school_id = await getUserInstitution(req.user.id);
     const likeParam = `%${search}%`;
     const [[countRows], [classRows]] = await Promise.all([
-      pool.query(`SELECT COUNT(*) AS total FROM classes WHERE name LIKE ?`, [likeParam]),
+      pool.query(`SELECT COUNT(*) AS total FROM classes WHERE name LIKE ? AND school_id = ?`, [
+        likeParam,
+        school_id,
+      ]),
       pool.query(
         `SELECT c.id, c.name, c.school_id, t.id AS teacher_id, t.fullName AS teacher_fullName
          FROM classes c
          LEFT JOIN teachers t ON t.id = c.teacher_id
-         WHERE c.name LIKE ?
+         WHERE c.name LIKE ? AND c.school_id = ?
          ORDER BY c.id ASC
          LIMIT ? OFFSET ?`,
-        [likeParam, limit, offset]
+        [likeParam, school_id, limit, offset]
       ),
     ]);
 
@@ -110,11 +114,17 @@ export const updateClasses = async (req, res) => {
   const { name } = req.body;
 
   try {
+    const school_id = await getUserInstitution(req.user.id);
+
     const [existingRows] = await pool.query(`SELECT * FROM classes WHERE id = ? LIMIT 1`, [Number.parseInt(id)]);
     const existingClass = existingRows[0];
 
     if (!existingClass) {
       return errorResponse(res, 404, "Kelas tidak ditemukan");
+    }
+
+    if (existingClass.school_id !== school_id) {
+      return errorResponse(res, 403, "Kelas bukan milik sekolah anda");
     }
 
     await pool.query(`UPDATE classes SET name = ? WHERE id = ?`, [name, Number.parseInt(id)]);

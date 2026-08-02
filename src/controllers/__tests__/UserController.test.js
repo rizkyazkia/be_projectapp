@@ -144,6 +144,7 @@ describe("getUserById", () => {
           institution_address: "Jl. Mawar",
           institution_email: "school@a.com",
           institution_phone: "0800",
+          institution_city_name: "Jakarta",
         },
       ],
       [],
@@ -169,6 +170,7 @@ describe("getUserById", () => {
           address: "Jl. Mawar",
           email: "school@a.com",
           phone: "0800",
+          city: { name: "Jakarta" },
         },
       },
     });

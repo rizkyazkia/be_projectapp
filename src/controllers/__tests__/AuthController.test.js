@@ -419,9 +419,9 @@ describe("login", () => {
     );
     expect(res.cookie).toHaveBeenCalledWith("refreshToken", expect.any(String), {
       httpOnly: true,
-      maxAge: 86400000,
-      secure: true,
-      sameSite: "none",
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 604800000,
     });
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith({
@@ -499,11 +499,7 @@ describe("logout", () => {
       expect.stringContaining("UPDATE users SET refresh_token = NULL WHERE id = ?"),
       ["u1"]
     );
-    expect(res.clearCookie).toHaveBeenCalledWith("refreshToken", {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-    });
+    expect(res.clearCookie).toHaveBeenCalledWith("refreshToken");
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith({
       status: "success",

@@ -1,6 +1,26 @@
 import { randomUUID } from "node:crypto";
 import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
+import { getOrCreateCurrentPeriod } from "../helpers/MonitoringHelper.js";
+import { getInstitutionByUser } from "../helpers/InstitutionHelper.js";
+
+const isChildLinkedToInstitution = async (familyMemberId, institutionId) => {
+  const [rows] = await pool.query(
+    `SELECT 1
+     FROM students s
+     WHERE s.familyMemberId = ?
+       AND (
+         s.schoolId = ?
+         OR EXISTS (
+           SELECT 1 FROM recommendations r
+           WHERE r.studentId = s.id AND r.healthcareInstitutionId = ?
+         )
+       )
+     LIMIT 1`,
+    [familyMemberId, institutionId, institutionId],
+  );
+  return rows.length > 0;
+};
 
 const ALLOWED_FAMILY_MEMBER_FIELDS = [
   "fullName",
@@ -102,7 +122,9 @@ export const getFamilyMemberByUser = async (req, res) => {
          se.childrenCount AS se_childrenCount, se.underFiveCount AS se_underFiveCount,
          se.familyIncomeLevel AS se_familyIncomeLevel,
          nu.id AS nu_id, nu.height AS nu_height, nu.weight AS nu_weight, nu.bmi AS nu_bmi,
+         nu.measurementDate AS nu_measurementDate,
          ns.id AS ns_id, ns.information AS ns_information, ns.displayName AS ns_displayName,
+         mp.label AS mp_label,
          st.id AS st_id, st.nis AS st_nis, st.schoolYear AS st_schoolYear, st.semester AS st_semester,
          class.id AS class_id, class.name AS class_name,
          inst.id AS inst_id, inst.name AS inst_name, inst.email AS inst_email,
@@ -116,6 +138,7 @@ export const getFamilyMemberByUser = async (req, res) => {
        JOIN socio_economic se ON se.id = fm.socioEconomicId
        LEFT JOIN nutritions nu ON nu.familyMemberId = fm.id
        LEFT JOIN nutrition_status ns ON ns.id = nu.nutritionStatusId
+       LEFT JOIN monitoring_periods mp ON mp.id = nu.monitoringPeriodId
        LEFT JOIN students st ON st.familyMemberId = fm.id
        LEFT JOIN classes class ON class.id = st.classId
        LEFT JOIN institutions inst ON inst.id = st.schoolId
@@ -158,6 +181,7 @@ export const getFamilyMemberByUser = async (req, res) => {
               height: row.nu_height,
               weight: row.nu_weight,
               bmi: row.nu_bmi,
+              measurementDate: row.nu_measurementDate,
               nutritionStatus: row.ns_id
                 ? {
                     id: row.ns_id,
@@ -165,6 +189,7 @@ export const getFamilyMemberByUser = async (req, res) => {
                     displayName: row.ns_displayName,
                   }
                 : null,
+              monitoringPeriod: row.mp_label ? { label: row.mp_label } : null,
             },
           ]
         : [],
@@ -837,12 +862,9 @@ export const updateFamilyMember = async (req, res) => {
 
     const [rows] = await pool.query(
       `SELECT fm.*,
-              nu.id AS nu_id, nu.height AS nu_height, nu.weight AS nu_weight,
-              nu.bmi AS nu_bmi, nu.nutritionStatusId AS nu_nutritionStatusId,
               st.id AS st_id, st.nis AS st_nis, st.schoolYear AS st_schoolYear,
               st.semester AS st_semester, st.schoolId AS st_schoolId, st.classId AS st_classId
        FROM family_members fm
-       LEFT JOIN nutritions nu ON nu.familyMemberId = fm.id
        LEFT JOIN students st ON st.familyMemberId = fm.id
        WHERE fm.id = ?`,
       [id],
@@ -867,17 +889,6 @@ export const updateFamilyMember = async (req, res) => {
       phone: row.phone,
       isCompleted: !!row.isCompleted,
       socioEconomicId: row.socioEconomicId,
-      nutrition: row.nu_id
-        ? [
-            {
-              id: row.nu_id,
-              height: row.nu_height,
-              weight: row.nu_weight,
-              bmi: row.nu_bmi,
-              nutritionStatusId: row.nu_nutritionStatusId,
-            },
-          ]
-        : [],
       student: row.st_id
         ? {
             id: row.st_id,
@@ -911,10 +922,9 @@ export const updateFamilyMember = async (req, res) => {
       ]);
     }
 
-    if (
-      (height !== undefined || weight !== undefined) &&
-      familyMember.nutrition.length > 0
-    ) {
+    if (height !== undefined || weight !== undefined) {
+      const period = await getOrCreateCurrentPeriod(familyMember.familyId);
+
       let bmi, nutritionStatusId;
       if (height !== undefined && weight !== undefined) {
         const heightInMeters = Number(height) / 100;
@@ -957,21 +967,28 @@ export const updateFamilyMember = async (req, res) => {
         }
       }
 
+      // `nutritions.familyMemberId` is no longer unique — one row per
+      // monitoring period is expected now, so this always INSERTs a new
+      // measurement row for the current period rather than updating a
+      // single pre-existing row in place.
       const nutritionFields = {};
       if (height !== undefined) nutritionFields.height = Number(height);
       if (weight !== undefined) nutritionFields.weight = Number(weight);
       if (bmi !== undefined) nutritionFields.bmi = bmi;
       if (nutritionStatusId) nutritionFields.nutritionStatusId = nutritionStatusId;
+      nutritionFields.familyMemberId = familyMember.id;
+      nutritionFields.createdBy = req.user.id;
+      nutritionFields.measurementDate = new Date();
+      nutritionFields.monitoringPeriodId = period.id;
 
       const nutritionKeys = Object.keys(nutritionFields);
-      if (nutritionKeys.length > 0) {
-        const setClause = nutritionKeys.map((key) => `${key} = ?`).join(", ");
-        const params = nutritionKeys.map((key) => nutritionFields[key]);
-        await pool.query(`UPDATE nutritions SET ${setClause} WHERE id = ?`, [
-          ...params,
-          familyMember.nutrition[0].id,
-        ]);
-      }
+      const columns = nutritionKeys.join(", ");
+      const placeholders = nutritionKeys.map(() => "?").join(", ");
+      const params = nutritionKeys.map((key) => nutritionFields[key]);
+      await pool.query(
+        `INSERT INTO nutritions (${columns}) VALUES (${placeholders})`,
+        params,
+      );
     }
 
     if (type === "anak") {
@@ -1014,6 +1031,202 @@ export const updateFamilyMember = async (req, res) => {
     return successResponse(res, null, "Berhasil mengupdate anggota keluarga");
   } catch (error) {
     return errorResponse(res, error, "Gagal mengupdate anggota keluarga");
+  }
+};
+
+export const addMeasurement = async (req, res) => {
+  try {
+    const user = req.user;
+    const { id } = req.params;
+    const { height, weight, measurementDate } = req.body;
+
+    if (height === undefined || weight === undefined) {
+      return errorResponse(res, null, "Height and weight are required");
+    }
+
+    const [rows] = await pool.query(
+      `SELECT fm.*, f.userId AS family_userId
+       FROM family_members fm
+       JOIN families f ON f.id = fm.familyId
+       WHERE fm.id = ?`,
+      [id],
+    );
+    const familyMember = rows[0];
+
+    if (!familyMember) {
+      return errorResponse(res, null, "Family member not found");
+    }
+
+    if (familyMember.family_userId !== user.id) {
+      const institution =
+        user.role === "healthcare"
+          ? await getInstitutionByUser(user.id, user.role)
+          : null;
+      const linked =
+        institution &&
+        (await isChildLinkedToInstitution(familyMember.id, institution.id));
+      if (!linked) {
+        return errorResponse(res, 403, "Unauthorized");
+      }
+    }
+
+    const period = await getOrCreateCurrentPeriod(familyMember.familyId);
+
+    const heightInMeters = Number(height) / 100;
+    const calculateBMI = Number(weight) / (heightInMeters * heightInMeters);
+
+    let nutritionStatusId = null;
+    if (familyMember.birthDate && familyMember.gender) {
+      const childBirthDate = new Date(familyMember.birthDate);
+      const today = new Date();
+      let ageMonths =
+        (today.getFullYear() - childBirthDate.getFullYear()) * 12 +
+        (today.getMonth() - childBirthDate.getMonth());
+      if (today.getDate() < childBirthDate.getDate()) {
+        ageMonths--;
+      }
+      const ageYear = Math.floor(ageMonths / 12);
+      const ageMonthRemainder = ageMonths % 12;
+
+      const [bmiRefRows] = await pool.query(
+        "SELECT * FROM bmi_references WHERE gender = ? AND ageYear = ? AND ageMonthFrom <= ? AND ageMonthTo >= ? LIMIT 1",
+        [familyMember.gender, ageYear, ageMonthRemainder, ageMonthRemainder],
+      );
+      const bmiRef = bmiRefRows[0];
+
+      if (bmiRef) {
+        let nutritionStatusEnum;
+        if (calculateBMI < bmiRef.sdMinus2Min) {
+          nutritionStatusEnum = "GIZI_BURUK_KURANG";
+        } else if (calculateBMI > bmiRef.sdPlus1Max) {
+          nutritionStatusEnum = "OVERWEIGHT_OBESITAS";
+        } else {
+          nutritionStatusEnum = "GIZI_BAIK";
+        }
+
+        const [nutritionStatusRows] = await pool.query(
+          "SELECT * FROM nutrition_status WHERE status = ? LIMIT 1",
+          [nutritionStatusEnum],
+        );
+        nutritionStatusId = nutritionStatusRows[0]?.id ?? null;
+      }
+    }
+
+    const measurementDateValue = measurementDate
+      ? new Date(measurementDate)
+      : new Date();
+
+    const [insertResult] = await pool.query(
+      `INSERT INTO nutritions
+         (height, weight, bmi, nutritionStatusId, familyMemberId, createdBy, measurementDate, monitoringPeriodId)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        Number(height),
+        Number(weight),
+        calculateBMI,
+        nutritionStatusId,
+        familyMember.id,
+        user.id,
+        measurementDateValue,
+        period.id,
+      ],
+    );
+
+    const [nutritionRows] = await pool.query(
+      `SELECT n.*, ns.displayName AS ns_displayName, ns.information AS ns_information
+       FROM nutritions n
+       LEFT JOIN nutrition_status ns ON ns.id = n.nutritionStatusId
+       WHERE n.id = ?`,
+      [insertResult.insertId],
+    );
+    const nutritionRow = nutritionRows[0];
+
+    const nutrition = {
+      id: nutritionRow.id,
+      height: nutritionRow.height,
+      weight: nutritionRow.weight,
+      bmi: nutritionRow.bmi,
+      nutritionStatusId: nutritionRow.nutritionStatusId,
+      familyMemberId: nutritionRow.familyMemberId,
+      createdBy: nutritionRow.createdBy,
+      measurementDate: nutritionRow.measurementDate,
+      monitoringPeriodId: nutritionRow.monitoringPeriodId,
+      nutritionStatus: nutritionRow.ns_displayName
+        ? {
+            displayName: nutritionRow.ns_displayName,
+            information: nutritionRow.ns_information,
+          }
+        : null,
+    };
+
+    return successResponse(res, nutrition, "Measurement added successfully");
+  } catch (error) {
+    return errorResponse(res, error, "Failed to add measurement");
+  }
+};
+
+export const getNutritionHistory = async (req, res) => {
+  try {
+    const user = req.user;
+    const { id } = req.params;
+
+    const [rows] = await pool.query(
+      `SELECT fm.*, f.userId AS family_userId
+       FROM family_members fm
+       JOIN families f ON f.id = fm.familyId
+       WHERE fm.id = ?`,
+      [id],
+    );
+    const familyMember = rows[0];
+
+    if (!familyMember) {
+      return errorResponse(res, null, "Family member not found");
+    }
+
+    let allowed = familyMember.family_userId === user.id;
+    if (
+      !allowed &&
+      ["healthcare", "school", "teacher"].includes(user.role)
+    ) {
+      const institution = await getInstitutionByUser(user.id, user.role);
+      allowed =
+        !!institution &&
+        (await isChildLinkedToInstitution(familyMember.id, institution.id));
+    }
+    if (!allowed) {
+      return errorResponse(res, 403, "Unauthorized");
+    }
+
+    const [historyRows] = await pool.query(
+      `SELECT n.*, ns.displayName AS ns_displayName, ns.information AS ns_information,
+              mp.label AS mp_label
+       FROM nutritions n
+       LEFT JOIN nutrition_status ns ON ns.id = n.nutritionStatusId
+       LEFT JOIN monitoring_periods mp ON mp.id = n.monitoringPeriodId
+       WHERE n.familyMemberId = ?
+       ORDER BY n.measurementDate ASC`,
+      [id],
+    );
+
+    return successResponse(
+      res,
+      {
+        childId: id,
+        childName: familyMember.fullName,
+        history: historyRows.map((row) => ({
+          id: row.id,
+          measurementDate: row.measurementDate,
+          height: row.height,
+          weight: row.weight,
+          bmi: row.bmi,
+          nutritionStatus: row.ns_displayName ?? null,
+          period: row.mp_label ?? null,
+        })),
+      },
+      "Nutrition history retrieved successfully",
+    );
+  } catch (error) {
+    return errorResponse(res, error, "Failed to get nutrition history");
   }
 };
 

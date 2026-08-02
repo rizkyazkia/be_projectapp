@@ -1,5 +1,6 @@
 import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
+import { getInstitutionByUser } from "../helpers/InstitutionHelper.js";
 
 // NOTE: mysql2 can return COUNT(*)/COUNT(id) results as a JS number or as a
 // string representation of a BIGINT, depending on driver/row configuration.
@@ -278,27 +279,33 @@ export const getParentDashboardSummary = async (req, res) => {
 
     const memberIds = members.map((m) => m.id);
 
-    // 3. true-latest nutrition per member, scoped to this family's members only
-    // (same true-latest pattern as the admin dashboard's ALL-members version —
-    // correlated subquery, not ROW_NUMBER(), for MariaDB/older-MySQL compat).
+    // 3. full nutrition history per member, scoped to this family's members
+    // only, ordered oldest-to-newest (measurementDate ASC). The nutritions
+    // table lost its unique(familyMemberId) constraint upstream — multiple
+    // measurements per member are now expected, so this is no longer a
+    // true-latest lookup like the admin dashboard's; it fetches every
+    // measurement, joined with its monitoring period label.
     // Guarded: an empty IN (?) is invalid SQL, so skip the query entirely when
     // there are no members.
     let nutritionRows = [];
     if (memberIds.length > 0) {
       [nutritionRows] = await pool.query(
-        `SELECT n.familyMemberId, n.id, n.height, n.weight, n.bmi, n.updatedAt, ns.displayName
+        `SELECT n.familyMemberId, n.id, n.height, n.weight, n.bmi, n.measurementDate,
+                n.updatedAt, ns.displayName, mp.label AS periodLabel
          FROM nutritions n
          LEFT JOIN nutrition_status ns ON ns.id = n.nutritionStatusId
+         LEFT JOIN monitoring_periods mp ON mp.id = n.monitoringPeriodId
          WHERE n.familyMemberId IN (?)
-           AND n.updatedAt = (
-             SELECT MAX(n2.updatedAt) FROM nutritions n2 WHERE n2.familyMemberId = n.familyMemberId
-           )`,
+         ORDER BY n.measurementDate ASC`,
         [memberIds],
       );
     }
     const nutritionByMember = {};
     nutritionRows.forEach((n) => {
-      nutritionByMember[n.familyMemberId] = n;
+      if (!nutritionByMember[n.familyMemberId]) {
+        nutritionByMember[n.familyMemberId] = [];
+      }
+      nutritionByMember[n.familyMemberId].push(n);
     });
 
     // 4. students keyed by familyMemberId
@@ -333,25 +340,33 @@ export const getParentDashboardSummary = async (req, res) => {
       socioById[se.id] = se;
     });
 
+    // 6. this family's monitoring periods, oldest-to-newest.
+    const [monitoringPeriodRows] = await pool.query(
+      `SELECT id, familyId, label, startDate, endDate
+       FROM monitoring_periods
+       WHERE familyId = ?
+       ORDER BY startDate ASC`,
+      [family.id],
+    );
+
     // Compose the in-memory shape the (unchanged) pure-JS logic below expects,
     // matching Prisma's nested include shape.
     const familyMembers = members.map((m) => {
-      const n = nutritionByMember[m.id];
+      const nRows = nutritionByMember[m.id] ?? [];
       return {
         ...m,
-        nutrition: n
-          ? [
-              {
-                id: n.id,
-                height: n.height,
-                weight: n.weight,
-                bmi: n.bmi,
-                updatedAt: n.updatedAt,
-                nutritionStatus:
-                  n.displayName != null ? { displayName: n.displayName } : null,
-              },
-            ]
-          : [],
+        nutrition: nRows.map((n) => ({
+          id: n.id,
+          height: n.height,
+          weight: n.weight,
+          bmi: n.bmi,
+          measurementDate: n.measurementDate,
+          updatedAt: n.updatedAt,
+          nutritionStatus:
+            n.displayName != null ? { displayName: n.displayName } : null,
+          monitoringPeriod:
+            n.periodLabel != null ? { label: n.periodLabel } : null,
+        })),
         SocioEconomic: socioById[m.socioEconomicId] ?? null,
         student: studentByMember[m.id] ?? null,
       };
@@ -376,33 +391,49 @@ export const getParentDashboardSummary = async (req, res) => {
     ];
 
     if (parent) {
-      // 6. totalQuestionnaires
+      // 7. totalQuestionnaires
       const [totalQuestionnairesRows] = await pool.query(
         `SELECT COUNT(id) AS count FROM quesioners WHERE title IN (?)`,
         [parentTitles],
       );
       totalQuestionnaires = Number(totalQuestionnairesRows[0].count);
 
-      // 7. parentResponses — INNER JOIN quesioners (required relation).
+      // 8. parentResponses — INNER JOIN quesioners (required relation).
       // NOTE: `r.quisionerId` (the flat column) is read directly below rather
       // than a nested quesioner.id — this is the original behavior, not a typo,
-      // and must be preserved as-is.
+      // and must be preserved as-is. Now ordered newest-first so answered
+      // count and per-questionnaire results reflect distinct questionnaires
+      // (a parent can now answer the same questionnaire more than once).
       const [parentResponses] = await pool.query(
         `SELECT r.id, r.quisionerId, r.totalScore, r.familyMemberId, r.institutionId,
                 r.created_at, q.title AS quesionerTitle
          FROM responses r
          INNER JOIN quesioners q ON q.id = r.quisionerId
-         WHERE r.familyMemberId = ?`,
+         WHERE r.familyMemberId = ?
+         ORDER BY r.created_at DESC`,
         [parent.id],
       );
 
-      answeredQuestionnaires = parentResponses.length;
+      const answeredQuesionerIds = [
+        ...new Set(parentResponses.map((r) => r.quisionerId)),
+      ];
+      answeredQuestionnaires = answeredQuesionerIds.length;
+
       questionnaireProgress =
         totalQuestionnaires > 0
           ? Math.round((answeredQuestionnaires / totalQuestionnaires) * 100)
           : 0;
 
+      // Keep only the latest response per questionnaire (first-seen wins,
+      // since parentResponses is already ordered created_at DESC).
+      const latestPerQuesioner = new Map();
       for (const r of parentResponses) {
+        if (!latestPerQuesioner.has(r.quisionerId)) {
+          latestPerQuesioner.set(r.quisionerId, r);
+        }
+      }
+
+      for (const r of latestPerQuesioner.values()) {
         const threshold = QUESTIONNAIRE_THRESHOLDS[r.quesionerTitle];
         if (threshold) {
           questionnaireResults.push({
@@ -475,14 +506,14 @@ export const getParentDashboardSummary = async (req, res) => {
     const childWithSchool = children.find((c) => c.student?.schoolId);
     if (childWithSchool) {
       const schoolId = childWithSchool.student.schoolId;
-      // 8. schoolQuesioner lookup
+      // 9. schoolQuesioner lookup
       const [schoolQuesionerRows] = await pool.query(
         `SELECT id, title FROM quesioners WHERE title = ? LIMIT 1`,
         ["Pelayanan Kesehatan Sekolah"],
       );
       const schoolQuesioner = schoolQuesionerRows[0] ?? null;
       if (schoolQuesioner) {
-        // 9. latest response for that school+questionnaire
+        // 10. latest response for that school+questionnaire
         const [schoolResponseRows] = await pool.query(
           `SELECT id, quisionerId, totalScore, familyMemberId, institutionId, created_at
            FROM responses
@@ -504,6 +535,26 @@ export const getParentDashboardSummary = async (req, res) => {
       }
     }
 
+    const childrenNutritionHistory = children.map((child) => ({
+      childId: child.id,
+      childName: child.fullName,
+      measurements: child.nutrition.map((n) => ({
+        period: n.monitoringPeriod?.label ?? "-",
+        measurementDate: n.measurementDate,
+        height: n.height,
+        weight: n.weight,
+        bmi: n.bmi,
+        nutritionStatus: n.nutritionStatus?.displayName ?? null,
+      })),
+    }));
+
+    const monitoringPeriods = monitoringPeriodRows.map((mp) => ({
+      id: mp.id,
+      label: mp.label,
+      startDate: mp.startDate,
+      endDate: mp.endDate,
+    }));
+
     return successResponse(
       res,
       {
@@ -519,6 +570,8 @@ export const getParentDashboardSummary = async (req, res) => {
           latestNutrition?.nutritionStatus?.displayName ?? null,
         nutritionDistribution: nutritionDistArray,
         schoolHealthService,
+        childrenNutritionHistory,
+        monitoringPeriods,
       },
       "Dashboard summary retrieved successfully",
     );
@@ -531,11 +584,7 @@ export const getSchoolDashboardSummary = async (req, res) => {
   try {
     const user = req.user;
 
-    const [institutionRows] = await pool.query(
-      `SELECT id, user_id, name FROM institutions WHERE user_id = ? LIMIT 1`,
-      [user.id],
-    );
-    const institution = institutionRows[0] ?? null;
+    const institution = await getInstitutionByUser(user.id, user.role);
 
     if (!institution) return errorResponse(res, null, "Institution not found");
 
@@ -566,35 +615,78 @@ export const getSchoolDashboardSummary = async (req, res) => {
     const totalTeachers = Number(teacherCountRows[0][0].count);
     const totalPartners = Number(partnerCountRows[0][0].count);
 
-    // Nutrition distribution — INTENTIONAL BUG-FOR-BUG REPRODUCTION. The
-    // original Prisma call has no orderBy/take on the nutrition relation, and
-    // the downstream JS reads array index [0] of an unsorted array — i.e. it
-    // reads whichever row the DB's default order happens to put first, NOT the
-    // true latest nutrition record. This is reproduced here by ordering
-    // (fm.id, n.id) ASC and taking the first nutrition row seen per member via
-    // a Set, NOT by ordering on updatedAt DESC like Task 34's two dashboards.
-    // Do not "fix" this to also be latest-first.
+    // Nutrition distribution — true-latest nutrition status per member, by
+    // createdAt (matching upstream's now-explicit orderBy createdAt desc /
+    // take 1). This replaces the previous bug-for-bug "first row in
+    // (fm.id, n.id) ASC order" reproduction — upstream fixed that bug by
+    // adding an explicit orderBy, so this correlated-subquery true-latest
+    // pattern (same shape as the admin/parent dashboards) is now correct here
+    // too.
     const [nutritionRows] = await pool.query(
-      `SELECT fm.id AS familyMemberId, n.id AS nutritionId, ns.displayName
+      `SELECT fm.id AS familyMemberId, ns.displayName
        FROM family_members fm
        INNER JOIN students st ON st.familyMemberId = fm.id
        LEFT JOIN nutritions n ON n.familyMemberId = fm.id
+         AND n.createdAt = (
+           SELECT MAX(n2.createdAt) FROM nutritions n2 WHERE n2.familyMemberId = fm.id
+         )
        LEFT JOIN nutrition_status ns ON ns.id = n.nutritionStatusId
-       WHERE st.schoolId = ?
-       ORDER BY fm.id ASC, n.id ASC`,
+       WHERE st.schoolId = ?`,
       [institutionId],
     );
-    const seenMembers = new Set();
     const nutritionMap = {};
     nutritionRows.forEach((row) => {
-      if (seenMembers.has(row.familyMemberId)) return;
-      seenMembers.add(row.familyMemberId);
       const name = row.displayName || "Tidak Terdata";
       nutritionMap[name] = (nutritionMap[name] || 0) + 1;
     });
     const nutritionDistribution = Object.entries(nutritionMap).map(
       ([displayName, total]) => ({ displayName, total }),
     );
+
+    // ANAK members of this school, with their class and full nutrition
+    // history (oldest-to-newest), for the new childrenNutritionHistory panel.
+    const [schoolStudents] = await pool.query(
+      `SELECT fm.id, fm.fullName, s.classId, c.name AS className
+       FROM family_members fm
+       INNER JOIN students s ON s.familyMemberId = fm.id
+       LEFT JOIN classes c ON c.id = s.classId
+       WHERE s.schoolId = ? AND fm.relation = 'ANAK'`,
+      [institutionId],
+    );
+    const schoolMemberIds = schoolStudents.map((s) => s.id);
+    let schoolNutritionRows = [];
+    if (schoolMemberIds.length > 0) {
+      [schoolNutritionRows] = await pool.query(
+        `SELECT n.familyMemberId, n.height, n.weight, n.bmi, n.measurementDate,
+                ns.displayName, mp.label AS periodLabel
+         FROM nutritions n
+         LEFT JOIN nutrition_status ns ON ns.id = n.nutritionStatusId
+         LEFT JOIN monitoring_periods mp ON mp.id = n.monitoringPeriodId
+         WHERE n.familyMemberId IN (?)
+         ORDER BY n.measurementDate ASC`,
+        [schoolMemberIds],
+      );
+    }
+    const schoolNutritionByMember = {};
+    schoolNutritionRows.forEach((n) => {
+      if (!schoolNutritionByMember[n.familyMemberId]) {
+        schoolNutritionByMember[n.familyMemberId] = [];
+      }
+      schoolNutritionByMember[n.familyMemberId].push(n);
+    });
+    const childrenNutritionHistory = schoolStudents.map((s) => ({
+      childId: s.id,
+      childName: s.fullName,
+      className: s.className ?? null,
+      measurements: (schoolNutritionByMember[s.id] ?? []).map((n) => ({
+        period: n.periodLabel ?? "-",
+        measurementDate: n.measurementDate,
+        height: n.height,
+        weight: n.weight,
+        bmi: n.bmi,
+        nutritionStatus: n.displayName ?? null,
+      })),
+    }));
 
     // classGroups groupBy — no zero-fill
     const [classGroups] = await pool.query(
@@ -618,72 +710,59 @@ export const getSchoolDashboardSummary = async (req, res) => {
       total: Number(g.count),
     }));
 
-    const QUESTIONNAIRE_THRESHOLDS = {
-      "Pelayanan Kesehatan Sekolah": { min: 17, good: "Tinggi", bad: "Rendah" },
-    };
-
-    const [quesionerRows] = await pool.query(
+    // QUESTIONNAIRE DATA — only Pelayanan Kesehatan Sekolah
+    const [schoolQuesionerRows] = await pool.query(
       `SELECT id, title FROM quesioners WHERE title = ? LIMIT 1`,
       ["Pelayanan Kesehatan Sekolah"],
     );
-    const quesioner = quesionerRows[0] ?? null;
+    const schoolQuesioner = schoolQuesionerRows[0] ?? null;
 
-    let questionnaireResult = null;
     let questionnaireProgress = 0;
-    let totalQuestionnaires = 0;
-    let answeredQuestionnaires = 0;
+    let questionnaireResult = null;
+    let schoolConclusion = null;
 
-    if (quesioner) {
-      totalQuestionnaires = 1;
+    if (schoolQuesioner) {
       const [responseRows] = await pool.query(
         `SELECT id, quisionerId, totalScore, institutionId, created_at
          FROM responses
          WHERE institutionId = ? AND quisionerId = ?
          ORDER BY created_at DESC
          LIMIT 1`,
-        [institutionId, quesioner.id],
+        [institutionId, schoolQuesioner.id],
       );
       const response = responseRows[0] ?? null;
 
       if (response) {
-        answeredQuestionnaires = 1;
-        const threshold = QUESTIONNAIRE_THRESHOLDS[quesioner.title]?.min ?? 17;
-        const totalScore = response.totalScore || 0;
+        questionnaireProgress = 100;
+
+        const interpretation = response.totalScore >= 17 ? "Tinggi" : "Rendah";
+
         questionnaireResult = {
-          quesionerId: quesioner.id,
-          title: quesioner.title,
-          totalScore,
-          interpretation:
-            totalScore >= threshold
-              ? (QUESTIONNAIRE_THRESHOLDS[quesioner.title]?.good ?? "Tinggi")
-              : (QUESTIONNAIRE_THRESHOLDS[quesioner.title]?.bad ?? "Rendah"),
+          title: schoolQuesioner.title,
+          totalScore: response.totalScore,
+          interpretation,
         };
-      }
-    }
 
-    questionnaireProgress =
-      totalQuestionnaires > 0
-        ? Math.round((answeredQuestionnaires / totalQuestionnaires) * 100)
-        : 0;
-
-    const schoolConclusion = questionnaireResult
-      ? questionnaireResult.interpretation === "Tinggi"
-        ? {
-            kategori: "Pelayanan Kesehatan Sekolah Baik",
-            icon: "🏆",
+        if (interpretation === "Tinggi") {
+          schoolConclusion = {
             color: "from-emerald-500 to-teal-600",
+            icon: "🏆",
+            kategori: "Pelayanan Kesehatan Sekolah Baik",
             saran: ["Budayakan perilaku hidup sehat dalam lingkungan sekolah"],
-          }
-        : {
-            kategori: "Pelayanan Kesehatan Sekolah Perlu Ditingkatkan",
-            icon: "⚠️",
+          };
+        } else {
+          schoolConclusion = {
             color: "from-amber-500 to-orange-600",
+            icon: "⚠️",
+            kategori: "Pelayanan Kesehatan Sekolah Perlu Ditingkatkan",
             saran: [
               "Rekomendasi tindaklanjut Puskesmas",
               "Budayakan perilaku hidup sehat dalam lingkungan sekolah",
             ],
-          }
-      : null;
+          };
+        }
+      }
+    }
 
     return successResponse(
       res,
@@ -692,16 +771,17 @@ export const getSchoolDashboardSummary = async (req, res) => {
         totalClasses,
         totalTeachers,
         totalPartners,
-        questionnaireProgress,
-        questionnaireResult,
         nutritionDistribution,
         studentsPerClass,
+        questionnaireProgress,
+        questionnaireResult,
         schoolConclusion,
+        childrenNutritionHistory,
       },
       "School dashboard summary retrieved successfully",
     );
   } catch (error) {
-    return errorResponse(res, error, "Failed to get school dashboard summary");
+    return errorResponse(res, error, "Internal server error");
   }
 };
 
@@ -709,14 +789,7 @@ export const getHealthcareDashboardSummary = async (req, res) => {
   try {
     const user = req.user;
 
-    // findFirst in the original vs findUnique in the school dashboard — both
-    // compile to LIMIT 1 since institutions.user_id is @unique; no behavior
-    // difference, so a plain LIMIT 1 SELECT covers both.
-    const [institutionRows] = await pool.query(
-      `SELECT id, user_id, name FROM institutions WHERE user_id = ? LIMIT 1`,
-      [user.id],
-    );
-    const institution = institutionRows[0] ?? null;
+    const institution = await getInstitutionByUser(user.id, user.role);
 
     if (!institution) return errorResponse(res, null, "Institution not found");
 

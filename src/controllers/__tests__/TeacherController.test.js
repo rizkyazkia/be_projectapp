@@ -29,10 +29,11 @@ beforeEach(() => {
 
 describe("getTeachers", () => {
   it("joins to-one relations in one query and groups to-many classes from a follow-up query", async () => {
-    const req = { query: {} };
+    const req = { user: { id: "admin-id" }, query: {} };
     const res = mockRes();
 
     pool.query
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // institution
       .mockResolvedValueOnce([[{ total: 1 }], []])
       .mockResolvedValueOnce([
         [
@@ -62,12 +63,12 @@ describe("getTeachers", () => {
     await getTeachers(req, res);
 
     expect(pool.query).toHaveBeenNthCalledWith(
-      1,
-      expect.stringContaining("WHERE fullName LIKE ? OR role LIKE ?"),
-      ["%%", "%%"]
+      2,
+      expect.stringContaining("WHERE school_id = ? AND (fullName LIKE ? OR role LIKE ?)"),
+      [5, "%%", "%%"]
     );
     expect(pool.query).toHaveBeenNthCalledWith(
-      3,
+      4,
       expect.stringContaining("SELECT id, name, teacher_id FROM classes WHERE teacher_id IN (?)"),
       [["t1"]]
     );
@@ -103,18 +104,33 @@ describe("getTeachers", () => {
   });
 
   it("edge: skips the classes follow-up query entirely when the teacher page is empty", async () => {
-    const req = { query: {} };
+    const req = { user: { id: "admin-id" }, query: {} };
     const res = mockRes();
 
-    pool.query.mockResolvedValueOnce([[{ total: 0 }], []]).mockResolvedValueOnce([[], []]);
+    pool.query
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // institution
+      .mockResolvedValueOnce([[{ total: 0 }], []])
+      .mockResolvedValueOnce([[], []]);
 
     await getTeachers(req, res);
 
-    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(pool.query).toHaveBeenCalledTimes(3);
+  });
+
+  it("guard: 404 when the caller has no institution", async () => {
+    const req = { user: { id: "admin-id" }, query: {} };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]); // no institution row
+
+    await getTeachers(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({ status: "error", message: "Institusi tidak ditemukan", error: 404 });
   });
 
   it("returns 500 via errorResponse when a query rejects", async () => {
-    const req = { query: {} };
+    const req = { user: { id: "admin-id" }, query: {} };
     const res = mockRes();
 
     pool.query.mockRejectedValueOnce(new Error("connection lost"));
@@ -167,7 +183,7 @@ describe("createTeacher", () => {
     expect(res.json).toHaveBeenCalledWith({ status: "error", message: "Kelas sudah memiliki wali kelas", error: null });
   });
 
-  it("links a NEW teacher record to an existing userless-teacher user, but the response omits `data` (preserved bug)", async () => {
+  it("links a NEW teacher record to an existing userless-teacher user and returns the updated user with nested teacher", async () => {
     randomUUID.mockReturnValueOnce("teacher-id-1");
     const req = {
       user: { id: "admin-id" },
@@ -181,7 +197,12 @@ describe("createTeacher", () => {
       .mockResolvedValueOnce([[{ id: "existing-user-id", username: "existing", email: "existing@x.com" }], []]) // existing user
       .mockResolvedValueOnce([[], []]) // that user has no teacher row yet
       .mockResolvedValueOnce([{ affectedRows: 1 }]) // INSERT INTO teachers
-      .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE classes teacher_id
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // UPDATE classes teacher_id
+      .mockResolvedValueOnce([
+        [{ id: "existing-user-id", username: "existing", email: "existing@x.com", role_id: 4 }],
+        [],
+      ]) // reselect user
+      .mockResolvedValueOnce([[{ id: "teacher-id-1", fullName: "Mr. Budi", role: "Wali 1A" }], []]); // reselect teacher
 
     await createTeacher(req, res);
 
@@ -191,15 +212,23 @@ describe("createTeacher", () => {
       ["teacher-id-1", "Mr. Budi", "Wali 1A", "Jl. C", "083", 5, "existing-user-id"]
     );
     expect(pool.query).toHaveBeenNthCalledWith(6, expect.stringContaining("UPDATE classes SET teacher_id = ?"), ["teacher-id-1", 1]);
+    expect(pool.query).toHaveBeenNthCalledWith(
+      7,
+      expect.stringContaining("SELECT id, username, email, role_id FROM users WHERE id = ?"),
+      ["existing-user-id"]
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(8, expect.stringContaining("SELECT * FROM teachers WHERE id = ?"), ["teacher-id-1"]);
     expect(res.json).toHaveBeenCalledWith({
       status: "success",
       message: "Berhasil menambahkan wali kelas",
-      data: undefined,
+      data: {
+        id: "existing-user-id",
+        username: "existing",
+        email: "existing@x.com",
+        role_id: 4,
+        teacher: { id: "teacher-id-1", fullName: "Mr. Budi", role: "Wali 1A" },
+      },
     });
-    // Explicit bug check: the body must have NO `data` key with real content — verify the actual call args shape.
-    const callArg = res.json.mock.calls[res.json.mock.calls.length - 1][0];
-    expect(Object.prototype.hasOwnProperty.call(callArg, "data")).toBe(true);
-    expect(callArg.data).toBeUndefined();
   });
 
   it("guard: existing user that already has a teacher record", async () => {
@@ -286,11 +315,12 @@ describe("createTeacher", () => {
 
 describe("updateTeacher", () => {
   it("nulls the old class then assigns the class named by `role` to this teacher", async () => {
-    const req = { params: { id: "t1" }, body: { role: "2A", address: "Jl. E", phone: "085" } };
+    const req = { user: { id: "admin-id" }, params: { id: "t1" }, body: { role: "2A", address: "Jl. E", phone: "085" } };
     const res = mockRes();
 
     pool.query
-      .mockResolvedValueOnce([[{ id: "t1" }], []]) // existing teacher
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // institution
+      .mockResolvedValueOnce([[{ id: "t1", school_id: 5 }], []]) // existing teacher
       .mockResolvedValueOnce([[{ id: 1 }], []]) // old class
       .mockResolvedValueOnce([{ affectedRows: 1 }]) // null out old class
       .mockResolvedValueOnce([[{ id: 2, name: "2A" }], []]) // new class found by name
@@ -300,9 +330,9 @@ describe("updateTeacher", () => {
 
     await updateTeacher(req, res);
 
-    expect(pool.query).toHaveBeenNthCalledWith(3, expect.stringContaining("UPDATE classes SET teacher_id = ?"), [null, 1]);
-    expect(pool.query).toHaveBeenNthCalledWith(4, expect.stringContaining("SELECT * FROM classes WHERE name = ?"), ["2A"]);
-    expect(pool.query).toHaveBeenNthCalledWith(5, expect.stringContaining("UPDATE classes SET teacher_id = ?"), ["t1", 2]);
+    expect(pool.query).toHaveBeenNthCalledWith(4, expect.stringContaining("UPDATE classes SET teacher_id = ?"), [null, 1]);
+    expect(pool.query).toHaveBeenNthCalledWith(5, expect.stringContaining("SELECT * FROM classes WHERE name = ?"), ["2A"]);
+    expect(pool.query).toHaveBeenNthCalledWith(6, expect.stringContaining("UPDATE classes SET teacher_id = ?"), ["t1", 2]);
     expect(res.json).toHaveBeenCalledWith({
       status: "success",
       message: "Guru berhasil diperbarui",
@@ -311,11 +341,12 @@ describe("updateTeacher", () => {
   });
 
   it("edge: skips nulling out when the teacher has no old class", async () => {
-    const req = { params: { id: "t1" }, body: { role: "2A", address: "Jl. E", phone: "085" } };
+    const req = { user: { id: "admin-id" }, params: { id: "t1" }, body: { role: "2A", address: "Jl. E", phone: "085" } };
     const res = mockRes();
 
     pool.query
-      .mockResolvedValueOnce([[{ id: "t1" }], []])
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // institution
+      .mockResolvedValueOnce([[{ id: "t1", school_id: 5 }], []])
       .mockResolvedValueOnce([[], []]) // no old class
       .mockResolvedValueOnce([[{ id: 2, name: "2A" }], []])
       .mockResolvedValueOnce([{ affectedRows: 1 }])
@@ -324,14 +355,28 @@ describe("updateTeacher", () => {
 
     await updateTeacher(req, res);
 
-    expect(pool.query).toHaveBeenCalledTimes(6);
+    expect(pool.query).toHaveBeenCalledTimes(7);
+  });
+
+  it("guard: 404 when the caller has no institution", async () => {
+    const req = { user: { id: "admin-id" }, params: { id: "t1" }, body: { role: "2A" } };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]); // no institution row
+
+    await updateTeacher(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({ status: "error", message: "Institusi tidak ditemukan", error: 404 });
   });
 
   it("guard: teacher not found (404-as-500 preserved)", async () => {
-    const req = { params: { id: "missing" }, body: { role: "2A" } };
+    const req = { user: { id: "admin-id" }, params: { id: "missing" }, body: { role: "2A" } };
     const res = mockRes();
 
-    pool.query.mockResolvedValueOnce([[], []]);
+    pool.query
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // institution
+      .mockResolvedValueOnce([[], []]);
 
     await updateTeacher(req, res);
 
@@ -339,12 +384,27 @@ describe("updateTeacher", () => {
     expect(res.json).toHaveBeenCalledWith({ status: "error", message: "Guru tidak ditemukan", error: 404 });
   });
 
-  it("guard: target class named by `role` does not exist", async () => {
-    const req = { params: { id: "t1" }, body: { role: "Nonexistent" } };
+  it("guard: 403 when the teacher does not belong to the caller's institution", async () => {
+    const req = { user: { id: "admin-id" }, params: { id: "t1" }, body: { role: "2A" } };
     const res = mockRes();
 
     pool.query
-      .mockResolvedValueOnce([[{ id: "t1" }], []])
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // institution
+      .mockResolvedValueOnce([[{ id: "t1", school_id: 99 }], []]); // teacher belongs to a different school
+
+    await updateTeacher(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({ status: "error", message: "Guru bukan milik sekolah anda", error: 403 });
+  });
+
+  it("guard: target class named by `role` does not exist", async () => {
+    const req = { user: { id: "admin-id" }, params: { id: "t1" }, body: { role: "Nonexistent" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // institution
+      .mockResolvedValueOnce([[{ id: "t1", school_id: 5 }], []])
       .mockResolvedValueOnce([[], []])
       .mockResolvedValueOnce([[], []]); // class named "Nonexistent" not found
 
@@ -354,7 +414,7 @@ describe("updateTeacher", () => {
   });
 
   it("returns 500 via errorResponse when a query rejects", async () => {
-    const req = { params: { id: "t1" }, body: { role: "2A" } };
+    const req = { user: { id: "admin-id" }, params: { id: "t1" }, body: { role: "2A" } };
     const res = mockRes();
 
     pool.query.mockRejectedValueOnce(new Error("connection lost"));
@@ -372,36 +432,53 @@ describe("updateTeacher", () => {
 
 describe("deleteTeacher", () => {
   it("deletes the linked users row, which cascades to remove the teacher", async () => {
-    const req = { params: { id: "t1" } };
+    const req = { user: { id: "admin-id" }, params: { id: "t1" } };
     const res = mockRes();
 
     pool.query
-      .mockResolvedValueOnce([[{ id: "t1", user_id: "u1" }], []])
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // institution
+      .mockResolvedValueOnce([[{ id: "t1", user_id: "u1", school_id: 5 }], []])
       .mockResolvedValueOnce([{ affectedRows: 1 }]);
 
     await deleteTeacher(req, res);
 
-    expect(pool.query).toHaveBeenNthCalledWith(2, expect.stringContaining("DELETE FROM users WHERE id = ?"), ["u1"]);
+    expect(pool.query).toHaveBeenNthCalledWith(3, expect.stringContaining("DELETE FROM users WHERE id = ?"), ["u1"]);
     expect(res.json).toHaveBeenCalledWith({ status: "success", message: "Guru berhasil dihapus", data: null });
   });
 
   it("bug: reports success without deleting anything when the teacher has no linked user_id", async () => {
-    const req = { params: { id: "t1" } };
+    const req = { user: { id: "admin-id" }, params: { id: "t1" } };
     const res = mockRes();
 
-    pool.query.mockResolvedValueOnce([[{ id: "t1", user_id: null }], []]);
+    pool.query
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // institution
+      .mockResolvedValueOnce([[{ id: "t1", user_id: null, school_id: 5 }], []]);
 
     await deleteTeacher(req, res);
 
-    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(pool.query).toHaveBeenCalledTimes(2);
     expect(res.json).toHaveBeenCalledWith({ status: "success", message: "Guru berhasil dihapus", data: null });
   });
 
-  it("guard: teacher not found (404-as-500 preserved)", async () => {
-    const req = { params: { id: "missing" } };
+  it("guard: 404 when the caller has no institution", async () => {
+    const req = { user: { id: "admin-id" }, params: { id: "t1" } };
     const res = mockRes();
 
-    pool.query.mockResolvedValueOnce([[], []]);
+    pool.query.mockResolvedValueOnce([[], []]); // no institution row
+
+    await deleteTeacher(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({ status: "error", message: "Institusi tidak ditemukan", error: 404 });
+  });
+
+  it("guard: teacher not found (404-as-500 preserved)", async () => {
+    const req = { user: { id: "admin-id" }, params: { id: "missing" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // institution
+      .mockResolvedValueOnce([[], []]);
 
     await deleteTeacher(req, res);
 
@@ -409,8 +486,22 @@ describe("deleteTeacher", () => {
     expect(res.json).toHaveBeenCalledWith({ status: "error", message: "Guru tidak ditemukan", error: 404 });
   });
 
+  it("guard: 403 when the teacher does not belong to the caller's institution", async () => {
+    const req = { user: { id: "admin-id" }, params: { id: "t1" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // institution
+      .mockResolvedValueOnce([[{ id: "t1", user_id: "u1", school_id: 99 }], []]); // different school
+
+    await deleteTeacher(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({ status: "error", message: "Guru bukan milik sekolah anda", error: 403 });
+  });
+
   it("returns 500 via errorResponse when a query rejects", async () => {
-    const req = { params: { id: "t1" } };
+    const req = { user: { id: "admin-id" }, params: { id: "t1" } };
     const res = mockRes();
 
     pool.query.mockRejectedValueOnce(new Error("connection lost"));

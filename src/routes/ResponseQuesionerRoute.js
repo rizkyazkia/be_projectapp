@@ -4,6 +4,8 @@ import {
   checkAnsweredQuesionerInstitution,
   createResponseQuesioner,
   createResponseQuesionerInstitution,
+  getResponseHistory,
+  getResponseHistoryInstitution,
   getResponseQuesioner,
   getResponseQuesionerInstitution,
   showResponseForInstitution,
@@ -15,6 +17,12 @@ import { verifyToken } from "../middelware/verifyToken.js";
 const router = Router();
 
 router.get("/response/:id", verifyToken, getResponseQuesioner);
+router.get("/response/history/:id", verifyToken, getResponseHistory);
+router.get(
+  "/response/history/institution/:id",
+  verifyToken,
+  getResponseHistoryInstitution
+);
 router.get(
   "/response/institution/:id",
   verifyToken,

@@ -341,23 +341,26 @@ describe("getParentDashboardSummary", () => {
     });
   });
 
-  it("guards the empty-members case: skips nutrition/students/socioEconomic queries entirely when the family has no members", async () => {
+  it("guards the empty-members case: skips nutrition/students/socioEconomic queries entirely when the family has no members, but still fetches monitoringPeriods", async () => {
     pool.query
       .mockResolvedValueOnce([[{ id: "fam-1", userId: "user-1" }], []]) // families
-      .mockResolvedValueOnce([[], []]); // family_members — empty
+      .mockResolvedValueOnce([[], []]) // family_members — empty
+      .mockResolvedValueOnce([[], []]); // monitoring_periods
     const res = mockRes();
 
     await getParentDashboardSummary(mockReq(), res);
 
-    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(pool.query).toHaveBeenCalledTimes(3);
     const body = res.json.mock.calls[0][0];
     expect(body.data.totalFamilyMembers).toBe(0);
     expect(body.data.totalChildren).toBe(0);
     expect(body.data.questionnaireProgress).toBe(0);
     expect(body.data.schoolHealthService).toBeNull();
+    expect(body.data.childrenNutritionHistory).toEqual([]);
+    expect(body.data.monitoringPeriods).toEqual([]);
   });
 
-  it("guards on parent existence separately from the empty-members guard: skips totalQuestionnaires/parentResponses when there is no IBU/AYAH member, but still runs nutrition/students/socioEconomic for the ANAK member", async () => {
+  it("guards on parent existence separately from the empty-members guard: skips totalQuestionnaires/parentResponses when there is no IBU/AYAH member, but still runs nutrition/students/socioEconomic/monitoringPeriods for the ANAK member", async () => {
     pool.query
       .mockResolvedValueOnce([[{ id: "fam-1", userId: "user-1" }], []]) // families
       .mockResolvedValueOnce([
@@ -374,18 +377,19 @@ describe("getParentDashboardSummary", () => {
       ]) // family_members — only a child, no parent
       .mockResolvedValueOnce([[], []]) // nutrition rows
       .mockResolvedValueOnce([[], []]) // students rows
-      .mockResolvedValueOnce([[], []]); // socio_economic rows
+      .mockResolvedValueOnce([[], []]) // socio_economic rows
+      .mockResolvedValueOnce([[], []]); // monitoring_periods
     const res = mockRes();
 
     await getParentDashboardSummary(mockReq(), res);
 
-    expect(pool.query).toHaveBeenCalledTimes(5);
+    expect(pool.query).toHaveBeenCalledTimes(6);
     const body = res.json.mock.calls[0][0];
     expect(body.data.totalQuestionnaires).toBe(0);
     expect(body.data.questionnaireResults).toEqual([]);
   });
 
-  it("composes the true-latest nutrition per member from a separately-fetched, correlated-subquery-ordered query (same true-latest pattern as the admin dashboard)", async () => {
+  it("composes the full nutrition history per member (measurementDate ASC, joined with monitoring period label) — nutritions no longer have a unique-per-member constraint, so this is a full history, not a true-latest lookup", async () => {
     pool.query
       .mockResolvedValueOnce([[{ id: "fam-1", userId: "user-1" }], []]) // families
       .mockResolvedValueOnce([
@@ -408,21 +412,24 @@ describe("getParentDashboardSummary", () => {
             height: 90,
             weight: 12,
             bmi: 14.8,
+            measurementDate: new Date("2026-07-10T00:00:00Z"),
             updatedAt: new Date("2026-07-10T00:00:00Z"),
             displayName: "Gizi Baik",
+            periodLabel: "Juli 2026",
           },
         ],
         [],
       ]) // nutrition rows
       .mockResolvedValueOnce([[], []]) // students rows
-      .mockResolvedValueOnce([[{ id: 1, residenceStatus: null }], []]); // socio_economic rows
+      .mockResolvedValueOnce([[{ id: 1, residenceStatus: null }], []]) // socio_economic rows
+      .mockResolvedValueOnce([[], []]); // monitoring_periods
     const res = mockRes();
 
     await getParentDashboardSummary(mockReq(), res);
 
     expect(pool.query).toHaveBeenNthCalledWith(
       3,
-      expect.stringContaining("MAX(n2.updatedAt)"),
+      expect.stringContaining("ORDER BY n.measurementDate ASC"),
       [["child-1"]],
     );
     const body = res.json.mock.calls[0][0];
@@ -430,9 +437,86 @@ describe("getParentDashboardSummary", () => {
     expect(body.data.nutritionDistribution).toEqual([
       { displayName: "Gizi Baik", total: 1 },
     ]);
+    expect(body.data.childrenNutritionHistory).toEqual([
+      {
+        childId: "child-1",
+        childName: "Anak Satu",
+        measurements: [
+          {
+            period: "Juli 2026",
+            measurementDate: new Date("2026-07-10T00:00:00Z"),
+            height: 90,
+            weight: 12,
+            bmi: 14.8,
+            nutritionStatus: "Gizi Baik",
+          },
+        ],
+      },
+    ]);
   });
 
-  it("parentResponses: INNER JOINs quesioners (required relation) and reads the flat r.quisionerId column directly, not a nested quesioner.id (preserving original non-typo behavior)", async () => {
+  it("nutritionDistribution buckets each child by their OLDEST nutrition record (child.nutrition[0] in ascending measurementDate order) — preserved verbatim from upstream, NOT fixed to be latest-first", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fam-1", userId: "user-1" }], []]) // families
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "child-1",
+            fullName: "Anak Satu",
+            relation: "ANAK",
+            socioEconomicId: 1,
+            education: null,
+          },
+        ],
+        [],
+      ]) // family_members
+      .mockResolvedValueOnce([
+        [
+          // ASC order (oldest first) — matches the query's ORDER BY
+          {
+            familyMemberId: "child-1",
+            id: 1,
+            height: 80,
+            weight: 10,
+            bmi: 15.6,
+            measurementDate: new Date("2026-06-01T00:00:00Z"),
+            updatedAt: new Date("2026-06-01T00:00:00Z"),
+            displayName: "Gizi Kurang",
+            periodLabel: "Juni 2026",
+          },
+          {
+            familyMemberId: "child-1",
+            id: 2,
+            height: 90,
+            weight: 12,
+            bmi: 14.8,
+            measurementDate: new Date("2026-07-01T00:00:00Z"),
+            updatedAt: new Date("2026-07-01T00:00:00Z"),
+            displayName: "Gizi Baik",
+            periodLabel: "Juli 2026",
+          },
+        ],
+        [],
+      ]) // nutrition rows
+      .mockResolvedValueOnce([[], []]) // students rows
+      .mockResolvedValueOnce([[], []]) // socio_economic rows
+      .mockResolvedValueOnce([[], []]); // monitoring_periods
+    const res = mockRes();
+
+    await getParentDashboardSummary(mockReq(), res);
+
+    const body = res.json.mock.calls[0][0];
+    // reads child.nutrition[0] — the OLDEST row in ASC order — so "Gizi Kurang"
+    expect(body.data.nutritionDistribution).toEqual([
+      { displayName: "Gizi Kurang", total: 1 },
+    ]);
+    // latestNutritionStatus, in contrast, sorts ALL measurements by updatedAt
+    // desc, so it correctly reflects the true latest: "Gizi Baik"
+    expect(body.data.latestNutritionStatus).toBe("Gizi Baik");
+    expect(body.data.childrenNutritionHistory[0].measurements).toHaveLength(2);
+  });
+
+  it("parentResponses: INNER JOINs quesioners (required relation), orders newest-first, and reads the flat r.quisionerId column directly, not a nested quesioner.id (preserving original non-typo behavior)", async () => {
     pool.query
       .mockResolvedValueOnce([[{ id: "fam-1", userId: "user-1" }], []]) // families
       .mockResolvedValueOnce([
@@ -450,6 +534,7 @@ describe("getParentDashboardSummary", () => {
       .mockResolvedValueOnce([[], []]) // nutrition rows
       .mockResolvedValueOnce([[], []]) // students rows
       .mockResolvedValueOnce([[{ id: 1, residenceStatus: null }], []]) // socio_economic rows
+      .mockResolvedValueOnce([[], []]) // monitoring_periods
       .mockResolvedValueOnce([[{ count: 2 }], []]) // totalQuestionnaires
       .mockResolvedValueOnce([
         [
@@ -467,16 +552,17 @@ describe("getParentDashboardSummary", () => {
     await getParentDashboardSummary(mockReq(), res);
 
     expect(pool.query).toHaveBeenNthCalledWith(
-      6,
+      7,
       expect.stringContaining("title IN (?)"),
       [["Tingkat Pengetahuan Gizi Seimbang", "Kebiasaan Sehari-hari Anak"]],
     );
     expect(pool.query).toHaveBeenNthCalledWith(
-      7,
-      expect.stringContaining("INNER JOIN quesioners"),
+      8,
+      expect.stringContaining("ORDER BY r.created_at DESC"),
       ["parent-1"],
     );
     const body = res.json.mock.calls[0][0];
+    expect(body.data.answeredQuestionnaires).toBe(1);
     expect(body.data.questionnaireResults).toEqual([
       {
         quesionerId: 42, // from the flat r.quisionerId column
@@ -487,7 +573,62 @@ describe("getParentDashboardSummary", () => {
     ]);
   });
 
-  it("schoolHealthService: stays null when no child has a schoolId (queries 8/9 are skipped)", async () => {
+  it("parentResponses: dedupes by quisionerId — answeredQuestionnaires counts distinct questionnaires, and only the newest response per questionnaire drives the interpretation", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fam-1", userId: "user-1" }], []]) // families
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "parent-1",
+            fullName: "Ibu Satu",
+            relation: "IBU",
+            socioEconomicId: 1,
+            education: "SMA",
+          },
+        ],
+        [],
+      ]) // family_members
+      .mockResolvedValueOnce([[], []]) // nutrition rows
+      .mockResolvedValueOnce([[], []]) // students rows
+      .mockResolvedValueOnce([[], []]) // socio_economic rows
+      .mockResolvedValueOnce([[], []]) // monitoring_periods
+      .mockResolvedValueOnce([[{ count: 2 }], []]) // totalQuestionnaires
+      .mockResolvedValueOnce([
+        [
+          // already ORDER BY r.created_at DESC — newest first
+          {
+            id: "resp-2",
+            quisionerId: 42,
+            totalScore: 10, // newest answer — below threshold
+            quesionerTitle: "Kebiasaan Sehari-hari Anak",
+          },
+          {
+            id: "resp-1",
+            quisionerId: 42,
+            totalScore: 40, // older answer to the SAME questionnaire — must be ignored
+            quesionerTitle: "Kebiasaan Sehari-hari Anak",
+          },
+        ],
+        [],
+      ]); // parentResponses — two responses, same questionnaire
+    const res = mockRes();
+
+    await getParentDashboardSummary(mockReq(), res);
+
+    const body = res.json.mock.calls[0][0];
+    expect(body.data.answeredQuestionnaires).toBe(1); // distinct quisionerId count, not row count
+    expect(body.data.questionnaireProgress).toBe(50); // 1 of 2 total questionnaires
+    expect(body.data.questionnaireResults).toEqual([
+      {
+        quesionerId: 42,
+        title: "Kebiasaan Sehari-hari Anak",
+        totalScore: 10, // from the newest response, not the older higher-scoring one
+        interpretation: "Kurang Baik",
+      },
+    ]);
+  });
+
+  it("schoolHealthService: stays null when no child has a schoolId (schoolQuesioner/schoolResponse queries are skipped)", async () => {
     pool.query
       .mockResolvedValueOnce([[{ id: "fam-1", userId: "user-1" }], []])
       .mockResolvedValueOnce([
@@ -504,12 +645,13 @@ describe("getParentDashboardSummary", () => {
       ])
       .mockResolvedValueOnce([[], []])
       .mockResolvedValueOnce([[], []]) // students rows — no student record at all
-      .mockResolvedValueOnce([[{ id: 1, residenceStatus: null }], []]);
+      .mockResolvedValueOnce([[{ id: 1, residenceStatus: null }], []])
+      .mockResolvedValueOnce([[], []]); // monitoring_periods
     const res = mockRes();
 
     await getParentDashboardSummary(mockReq(), res);
 
-    expect(pool.query).toHaveBeenCalledTimes(5);
+    expect(pool.query).toHaveBeenCalledTimes(6);
     const body = res.json.mock.calls[0][0];
     expect(body.data.schoolHealthService).toBeNull();
   });
@@ -535,6 +677,7 @@ describe("getParentDashboardSummary", () => {
         [],
       ]) // students rows
       .mockResolvedValueOnce([[{ id: 1, residenceStatus: null }], []])
+      .mockResolvedValueOnce([[], []]) // monitoring_periods
       .mockResolvedValueOnce([
         [{ id: 9, title: "Pelayanan Kesehatan Sekolah" }],
         [],
@@ -545,7 +688,7 @@ describe("getParentDashboardSummary", () => {
     await getParentDashboardSummary(mockReq(), res);
 
     expect(pool.query).toHaveBeenNthCalledWith(
-      7,
+      8,
       expect.stringContaining("ORDER BY created_at DESC"),
       [200, 9],
     );
@@ -586,6 +729,7 @@ describe("getParentDashboardSummary", () => {
         ],
         [],
       ])
+      .mockResolvedValueOnce([[], []]) // monitoring_periods
       .mockResolvedValueOnce([[{ count: 2 }], []])
       .mockResolvedValueOnce([[], []]);
     const res = mockRes();
@@ -600,6 +744,42 @@ describe("getParentDashboardSummary", () => {
       education: "SD",
       category: "Dasar",
     });
+  });
+
+  it("monitoringPeriods: maps the family's monitoring_periods rows (oldest-to-newest) into id/label/startDate/endDate", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: "fam-1", userId: "user-1" }], []]) // families
+      .mockResolvedValueOnce([[], []]) // family_members — empty
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "mp-1",
+            familyId: "fam-1",
+            label: "Juli 2026",
+            startDate: new Date("2026-07-01T00:00:00Z"),
+            endDate: new Date("2026-07-31T00:00:00Z"),
+          },
+        ],
+        [],
+      ]); // monitoring_periods
+    const res = mockRes();
+
+    await getParentDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("FROM monitoring_periods"),
+      ["fam-1"],
+    );
+    const body = res.json.mock.calls[0][0];
+    expect(body.data.monitoringPeriods).toEqual([
+      {
+        id: "mp-1",
+        label: "Juli 2026",
+        startDate: new Date("2026-07-01T00:00:00Z"),
+        endDate: new Date("2026-07-31T00:00:00Z"),
+      },
+    ]);
   });
 
   it("returns the errorResponse shape when a pool.query call genuinely rejects (not the family-not-found early return)", async () => {
@@ -621,7 +801,7 @@ describe("getParentDashboardSummary", () => {
 });
 
 describe("getSchoolDashboardSummary", () => {
-  it("returns the errorResponse default (500) shape when no institution matches user_id, issuing only 1 query", async () => {
+  it("returns the errorResponse default (500) shape when no institution matches user_id, issuing only 1 query (via getInstitutionByUser)", async () => {
     pool.query.mockResolvedValueOnce([[], []]); // institutions lookup — empty
     const res = mockRes();
 
@@ -648,9 +828,10 @@ describe("getSchoolDashboardSummary", () => {
       .mockResolvedValueOnce([[{ count: 3 }], []]) // totalClasses
       .mockResolvedValueOnce([[{ count: 2 }], []]) // totalTeachers
       .mockResolvedValueOnce([[{ count: 1 }], []]) // totalPartners
-      .mockResolvedValueOnce([[], []]) // nutrition rows
+      .mockResolvedValueOnce([[], []]) // nutrition distribution rows
+      .mockResolvedValueOnce([[], []]) // schoolStudents (ANAK members)
       .mockResolvedValueOnce([[], []]) // classGroups
-      .mockResolvedValueOnce([[], []]); // quesioner lookup
+      .mockResolvedValueOnce([[], []]); // schoolQuesioner lookup
     const res = mockRes();
 
     await getSchoolDashboardSummary(mockReq(), res);
@@ -686,7 +867,7 @@ describe("getSchoolDashboardSummary", () => {
     );
   });
 
-  it("nutritionDistribution reproduces the original bug: takes the FIRST nutrition row per member in (fm.id, n.id ASC) order, not the true latest", async () => {
+  it("nutritionDistribution: true-latest nutrition status per member by createdAt (correlated MAX(createdAt) subquery — same true-latest pattern as the admin/parent dashboards), replacing the old bug-for-bug first-row reproduction", async () => {
     pool.query
       .mockResolvedValueOnce([[{ id: 55, user_id: "user-1" }], []])
       .mockResolvedValueOnce([[{ count: 2 }], []])
@@ -695,38 +876,121 @@ describe("getSchoolDashboardSummary", () => {
       .mockResolvedValueOnce([[{ count: 0 }], []])
       .mockResolvedValueOnce([
         [
-          // member fm-1 has TWO nutrition rows (n.id 10 then 20, ASC order).
-          // The bug-for-bug behavior takes n.id=10's status ("Gizi Kurang"),
-          // ignoring n.id=20's status ("Gizi Baik") even though 20 is the
-          // more-recently-inserted row. This is NOT "fixed" to be latest-first.
-          { familyMemberId: "fm-1", nutritionId: 10, displayName: "Gizi Kurang" },
-          { familyMemberId: "fm-1", nutritionId: 20, displayName: "Gizi Baik" },
-          // member fm-2 has zero nutrition rows -> Tidak Terdata
-          { familyMemberId: "fm-2", nutritionId: null, displayName: null },
+          { familyMemberId: "fm-1", displayName: "Gizi Baik" },
+          { familyMemberId: "fm-2", displayName: null },
         ],
         [],
-      ])
+      ]) // nutrition distribution rows — one row per member, true-latest by createdAt
+      .mockResolvedValueOnce([[], []]) // schoolStudents
       .mockResolvedValueOnce([[], []]) // classGroups
-      .mockResolvedValueOnce([[], []]); // quesioner
+      .mockResolvedValueOnce([[], []]); // schoolQuesioner
     const res = mockRes();
 
     await getSchoolDashboardSummary(mockReq(), res);
 
     expect(pool.query).toHaveBeenNthCalledWith(
       6,
-      expect.stringContaining("ORDER BY fm.id ASC, n.id ASC"),
+      expect.stringContaining("MAX(n2.createdAt)"),
       [55],
     );
     const body = res.json.mock.calls[0][0];
     expect(body.data.nutritionDistribution).toEqual(
       expect.arrayContaining([
-        { displayName: "Gizi Kurang", total: 1 },
+        { displayName: "Gizi Baik", total: 1 },
         { displayName: "Tidak Terdata", total: 1 },
       ]),
     );
-    expect(body.data.nutritionDistribution).not.toEqual(
-      expect.arrayContaining([{ displayName: "Gizi Baik", total: 1 }]),
+    expect(body.data.nutritionDistribution).toHaveLength(2);
+  });
+
+  it("childrenNutritionHistory: fetches ANAK members of the school with their class + full nutrition history (measurementDate ASC, joined with monitoring period label)", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 55, user_id: "user-1" }], []]) // institution
+      .mockResolvedValueOnce([[{ count: 1 }], []])
+      .mockResolvedValueOnce([[{ count: 1 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[], []]) // nutrition distribution rows
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "child-1",
+            fullName: "Anak Satu",
+            classId: 7,
+            className: "Kelas 1A",
+          },
+        ],
+        [],
+      ]) // schoolStudents
+      .mockResolvedValueOnce([
+        [
+          {
+            familyMemberId: "child-1",
+            height: 90,
+            weight: 12,
+            bmi: 14.8,
+            measurementDate: new Date("2026-07-01T00:00:00Z"),
+            displayName: "Gizi Baik",
+            periodLabel: "Juli 2026",
+          },
+        ],
+        [],
+      ]) // nutrition history for schoolStudents
+      .mockResolvedValueOnce([[{ classId: 7, count: 1 }], []]) // classGroups
+      .mockResolvedValueOnce([[{ id: 7, name: "Kelas 1A" }], []]) // classes IN(?)
+      .mockResolvedValueOnce([[], []]); // schoolQuesioner
+    const res = mockRes();
+
+    await getSchoolDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      7,
+      expect.stringContaining("fm.relation = 'ANAK'"),
+      [55],
     );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      8,
+      expect.stringContaining("ORDER BY n.measurementDate ASC"),
+      [["child-1"]],
+    );
+    const body = res.json.mock.calls[0][0];
+    expect(body.data.childrenNutritionHistory).toEqual([
+      {
+        childId: "child-1",
+        childName: "Anak Satu",
+        className: "Kelas 1A",
+        measurements: [
+          {
+            period: "Juli 2026",
+            measurementDate: new Date("2026-07-01T00:00:00Z"),
+            height: 90,
+            weight: 12,
+            bmi: 14.8,
+            nutritionStatus: "Gizi Baik",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("childrenNutritionHistory: skips the nutrition-history query entirely when the school has no ANAK members", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 55, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[{ count: 0 }], []])
+      .mockResolvedValueOnce([[], []]) // nutrition distribution rows
+      .mockResolvedValueOnce([[], []]) // schoolStudents — empty
+      .mockResolvedValueOnce([[], []]) // classGroups
+      .mockResolvedValueOnce([[], []]); // schoolQuesioner
+    const res = mockRes();
+
+    await getSchoolDashboardSummary(mockReq(), res);
+
+    expect(pool.query).toHaveBeenCalledTimes(9); // nutrition-history-for-schoolStudents query skipped
+    const body = res.json.mock.calls[0][0];
+    expect(body.data.childrenNutritionHistory).toEqual([]);
   });
 
   it("classGroups: groupBy does NOT zero-fill classes with no students, and skips the classes IN(?) lookup entirely when there are no groups", async () => {
@@ -736,14 +1000,15 @@ describe("getSchoolDashboardSummary", () => {
       .mockResolvedValueOnce([[{ count: 0 }], []])
       .mockResolvedValueOnce([[{ count: 0 }], []])
       .mockResolvedValueOnce([[{ count: 0 }], []])
-      .mockResolvedValueOnce([[], []]) // nutrition rows
+      .mockResolvedValueOnce([[], []]) // nutrition distribution rows
+      .mockResolvedValueOnce([[], []]) // schoolStudents
       .mockResolvedValueOnce([[], []]) // classGroups — empty
-      .mockResolvedValueOnce([[], []]); // quesioner
+      .mockResolvedValueOnce([[], []]); // schoolQuesioner
     const res = mockRes();
 
     await getSchoolDashboardSummary(mockReq(), res);
 
-    expect(pool.query).toHaveBeenCalledTimes(8); // classes IN(?) lookup skipped
+    expect(pool.query).toHaveBeenCalledTimes(9); // classes IN(?) lookup skipped
     const body = res.json.mock.calls[0][0];
     expect(body.data.studentsPerClass).toEqual([]);
   });
@@ -755,16 +1020,17 @@ describe("getSchoolDashboardSummary", () => {
       .mockResolvedValueOnce([[{ count: 1 }], []])
       .mockResolvedValueOnce([[{ count: 1 }], []])
       .mockResolvedValueOnce([[{ count: 0 }], []])
-      .mockResolvedValueOnce([[], []])
+      .mockResolvedValueOnce([[], []]) // nutrition distribution rows
+      .mockResolvedValueOnce([[], []]) // schoolStudents
       .mockResolvedValueOnce([[{ classId: 7, count: "5" }], []]) // classGroups
       .mockResolvedValueOnce([[], []]) // classes IN(?) — classId 7 not found
-      .mockResolvedValueOnce([[], []]); // quesioner
+      .mockResolvedValueOnce([[], []]); // schoolQuesioner
     const res = mockRes();
 
     await getSchoolDashboardSummary(mockReq(), res);
 
     expect(pool.query).toHaveBeenNthCalledWith(
-      8,
+      9,
       expect.stringContaining("FROM classes WHERE id IN (?)"),
       [[7]],
     );
@@ -774,52 +1040,55 @@ describe("getSchoolDashboardSummary", () => {
     ]);
   });
 
-  it("questionnaireResult: skips the response lookup when quesioner is missing, leaving schoolConclusion null", async () => {
+  it("questionnaireResult: skips the response lookup when schoolQuesioner is missing, leaving schoolConclusion null and questionnaireProgress at 0", async () => {
     pool.query
       .mockResolvedValueOnce([[{ id: 55, user_id: "user-1" }], []])
       .mockResolvedValueOnce([[{ count: 0 }], []])
       .mockResolvedValueOnce([[{ count: 0 }], []])
       .mockResolvedValueOnce([[{ count: 0 }], []])
       .mockResolvedValueOnce([[{ count: 0 }], []])
-      .mockResolvedValueOnce([[], []])
-      .mockResolvedValueOnce([[], []])
-      .mockResolvedValueOnce([[], []]); // quesioner — not found
+      .mockResolvedValueOnce([[], []]) // nutrition distribution rows
+      .mockResolvedValueOnce([[], []]) // schoolStudents
+      .mockResolvedValueOnce([[], []]) // classGroups
+      .mockResolvedValueOnce([[], []]); // schoolQuesioner — not found
     const res = mockRes();
 
     await getSchoolDashboardSummary(mockReq(), res);
 
-    expect(pool.query).toHaveBeenCalledTimes(8);
+    expect(pool.query).toHaveBeenCalledTimes(9);
     const body = res.json.mock.calls[0][0];
     expect(body.data.questionnaireResult).toBeNull();
     expect(body.data.schoolConclusion).toBeNull();
+    expect(body.data.questionnaireProgress).toBe(0);
   });
 
-  it("questionnaireResult: applies the 17-point Tinggi/Rendah threshold and builds the matching schoolConclusion when a response exists", async () => {
+  it("questionnaireResult: sets questionnaireProgress to 100 and applies the 17-point Tinggi/Rendah threshold when a response exists (quesionerId dropped from the result shape upstream)", async () => {
     pool.query
       .mockResolvedValueOnce([[{ id: 55, user_id: "user-1" }], []])
       .mockResolvedValueOnce([[{ count: 0 }], []])
       .mockResolvedValueOnce([[{ count: 0 }], []])
       .mockResolvedValueOnce([[{ count: 0 }], []])
       .mockResolvedValueOnce([[{ count: 0 }], []])
-      .mockResolvedValueOnce([[], []])
-      .mockResolvedValueOnce([[], []])
+      .mockResolvedValueOnce([[], []]) // nutrition distribution rows
+      .mockResolvedValueOnce([[], []]) // schoolStudents
+      .mockResolvedValueOnce([[], []]) // classGroups
       .mockResolvedValueOnce([
         [{ id: 9, title: "Pelayanan Kesehatan Sekolah" }],
         [],
-      ]) // quesioner
+      ]) // schoolQuesioner
       .mockResolvedValueOnce([[{ id: "resp-1", totalScore: 10 }], []]); // response
     const res = mockRes();
 
     await getSchoolDashboardSummary(mockReq(), res);
 
     expect(pool.query).toHaveBeenNthCalledWith(
-      9,
+      10,
       expect.stringContaining("ORDER BY created_at DESC"),
       [55, 9],
     );
     const body = res.json.mock.calls[0][0];
+    expect(body.data.questionnaireProgress).toBe(100);
     expect(body.data.questionnaireResult).toEqual({
-      quesionerId: 9,
       title: "Pelayanan Kesehatan Sekolah",
       totalScore: 10,
       interpretation: "Rendah",
@@ -829,7 +1098,7 @@ describe("getSchoolDashboardSummary", () => {
     );
   });
 
-  it("returns the errorResponse shape when pool.query rejects", async () => {
+  it("returns the errorResponse shape (with the new 'Internal server error' message) when pool.query rejects", async () => {
     pool.query.mockRejectedValueOnce(new Error("connection refused"));
     const res = mockRes();
 
@@ -839,7 +1108,7 @@ describe("getSchoolDashboardSummary", () => {
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({
         status: "error",
-        message: "Failed to get school dashboard summary",
+        message: "Internal server error",
       }),
     );
   });

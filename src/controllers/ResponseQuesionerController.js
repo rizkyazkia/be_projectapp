@@ -1,6 +1,11 @@
 import pool from "../config/db.js";
 import { randomUUID } from "node:crypto";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
+import { getInstitutionByUser } from "../helpers/InstitutionHelper.js";
+import {
+  getOrCreateCurrentPeriod,
+  getPeriodLabelShort,
+} from "../helpers/MonitoringHelper.js";
 
 export const getResponseQuesioner = async (req, res) => {
   try {
@@ -33,7 +38,7 @@ export const getResponseQuesioner = async (req, res) => {
     }
 
     const [responses] = await pool.query(
-      "SELECT * FROM responses WHERE familyMemberId = ? AND quisionerId = ? LIMIT 1",
+      "SELECT * FROM responses WHERE familyMemberId = ? AND quisionerId = ? ORDER BY id DESC LIMIT 1",
       [familyMember.id, id]
     );
     const response = responses[0];
@@ -139,11 +144,21 @@ export const createResponseQuesioner = async (req, res) => {
       return errorResponse(res, 404, "Family member not found");
     }
 
+    let periodLabel = null;
+    if (user.role === "school") {
+      periodLabel = getPeriodLabelShort(new Date());
+    } else {
+      const period = await getOrCreateCurrentPeriod(family.id);
+      if (period) {
+        periodLabel = period.label;
+      }
+    }
+
     const responseId = randomUUID();
 
     await pool.query(
-      "INSERT INTO responses (id, quisionerId, created_at, totalScore, familyMemberId, institutionId) VALUES (?, ?, NOW(3), ?, ?, ?)",
-      [responseId, Number(id), 0, familyMember.id, null]
+      "INSERT INTO responses (id, quisionerId, created_at, totalScore, familyMemberId, institutionId, periodLabel) VALUES (?, ?, NOW(3), ?, ?, ?, ?)",
+      [responseId, Number(id), 0, familyMember.id, null, periodLabel]
     );
 
     const sanitizedData = answers.map((item) => ({
@@ -210,13 +225,13 @@ export const createResponseQuesioner = async (req, res) => {
     return successResponse(
       res,
       { count: insertResult.affectedRows },
-      "Berhasil menjawab kuisioner"
+      "Berhasil menjawab kuesioner"
     );
   } catch (error) {
     return errorResponse(
       res,
       error,
-      "Gagal menjawab kuisioner, silahkan diulang"
+      "Gagal menjawab kuesioner, silahkan diulang"
     );
   }
 };
@@ -244,7 +259,7 @@ export const checkAnsweredQuesioner = async (req, res) => {
       return errorResponse(res, 404, "Family member not found");
 
     const [responses] = await pool.query(
-      "SELECT * FROM responses WHERE familyMemberId = ? AND quisionerId = ? LIMIT 1",
+      "SELECT * FROM responses WHERE familyMemberId = ? AND quisionerId = ? ORDER BY id DESC LIMIT 1",
       [familyMember.id, id]
     );
     const response = responses[0];
@@ -271,7 +286,19 @@ export const checkAnsweredQuesioner = async (req, res) => {
     );
     const totalAnswers = totalAnswersResult[0].count;
 
-    return res.json({ answered: totalAnswers === totalQuestions });
+    const hasExisting = totalAnswers > 0;
+    return res.json({
+      answered: hasExisting && totalAnswers === totalQuestions,
+      canRefill: true,
+      lastResponse: hasExisting
+        ? {
+            id: response.id,
+            date: response.created_at,
+            totalScore: response.totalScore,
+          }
+        : null,
+      periodLabel: response?.periodLabel ?? null,
+    });
   } catch (error) {
     return errorResponse(res, error, "Failed to check answered status");
   }
@@ -336,18 +363,14 @@ export const getResponseQuesionerInstitution = async (req, res) => {
     const search = req.query.search || "";
     const offset = limit * page;
 
-    const [institutions] = await pool.query(
-      "SELECT * FROM institutions WHERE user_id = ? LIMIT 1",
-      [user.id]
-    );
-    const institution = institutions[0];
+    const institution = await getInstitutionByUser(user.id, user.role);
 
     if (!institution) {
       return errorResponse(res, 404, "Institution not found");
     }
 
     const [responses] = await pool.query(
-      "SELECT * FROM responses WHERE institutionId = ? AND quisionerId = ? LIMIT 1",
+      "SELECT * FROM responses WHERE institutionId = ? AND quisionerId = ? ORDER BY id DESC LIMIT 1",
       [institution.id, quesionerId]
     );
     const response = responses[0];
@@ -433,23 +456,20 @@ export const createResponseQuesionerInstitution = async (req, res) => {
       return errorResponse(res, 400, "Data must be an array in 'answers'");
     }
 
-    // Cari institution milik user
-    const [institutions] = await pool.query(
-      "SELECT * FROM institutions WHERE user_id = ? LIMIT 1",
-      [user.id]
-    );
-    const institution = institutions[0];
+    const institution = await getInstitutionByUser(user.id, user.role);
 
     if (!institution) {
       return errorResponse(res, 404, "Institution not found");
     }
 
+    const periodLabel = getPeriodLabelShort(new Date());
+
     // Buat response baru untuk institution
     const responseId = randomUUID();
 
     await pool.query(
-      "INSERT INTO responses (id, quisionerId, created_at, totalScore, familyMemberId, institutionId) VALUES (?, ?, NOW(3), ?, ?, ?)",
-      [responseId, Number(id), 0, null, institution.id]
+      "INSERT INTO responses (id, quisionerId, created_at, totalScore, familyMemberId, institutionId, periodLabel) VALUES (?, ?, NOW(3), ?, ?, ?, ?)",
+      [responseId, Number(id), 0, null, institution.id, periodLabel]
     );
 
     const sanitizedData = answers.map((item) => ({
@@ -517,13 +537,13 @@ export const createResponseQuesionerInstitution = async (req, res) => {
     return successResponse(
       res,
       { count: insertResult.affectedRows },
-      "Berhasil menjawab kuisioner"
+      "Berhasil menjawab kuesioner"
     );
   } catch (error) {
     return errorResponse(
       res,
       error,
-      "Gagal menjawab kuisioner, silahkan diulang"
+      "Gagal menjawab kuesioner, silahkan diulang"
     );
   }
 };
@@ -533,18 +553,13 @@ export const checkAnsweredQuesionerInstitution = async (req, res) => {
     const user = req.user;
     const quesionerId = Number(req.params.id);
 
-    // Cari institution milik user
-    const [institutions] = await pool.query(
-      "SELECT * FROM institutions WHERE user_id = ? LIMIT 1",
-      [user.id]
-    );
-    const institution = institutions[0];
+    const institution = await getInstitutionByUser(user.id, user.role);
 
     if (!institution) return errorResponse(res, 404, "Institution not found");
 
     // Cari response untuk institution & quesioner
     const [responses] = await pool.query(
-      "SELECT * FROM responses WHERE institutionId = ? AND quisionerId = ? LIMIT 1",
+      "SELECT * FROM responses WHERE institutionId = ? AND quisionerId = ? ORDER BY id DESC LIMIT 1",
       [institution.id, quesionerId]
     );
     const response = responses[0];
@@ -566,9 +581,102 @@ export const checkAnsweredQuesionerInstitution = async (req, res) => {
     );
     const totalAnswers = totalAnswersResult[0].count;
 
-    return res.json({ answered: totalAnswers === totalQuestions });
+    const hasExisting = totalAnswers > 0;
+    return res.json({
+      answered: hasExisting && totalAnswers === totalQuestions,
+      canRefill: true,
+      lastResponse: hasExisting
+        ? {
+            id: response.id,
+            date: response.created_at,
+            totalScore: response.totalScore,
+          }
+        : null,
+      periodLabel: response?.periodLabel ?? null,
+    });
   } catch (error) {
     return errorResponse(res, error, "Failed to check answered status");
+  }
+};
+
+export const getResponseHistory = async (req, res) => {
+  try {
+    const user = req.user;
+    const id = Number(req.params.id);
+
+    const [families] = await pool.query(
+      "SELECT * FROM families WHERE userId = ? LIMIT 1",
+      [user.id]
+    );
+    const family = families[0];
+
+    if (!family) return errorResponse(res, 404, "Family not found");
+
+    const [familyMembers] = await pool.query(
+      "SELECT * FROM family_members WHERE familyId = ? AND (relation = ? OR relation = ?) LIMIT 1",
+      [family.id, "IBU", "AYAH"]
+    );
+    const familyMember = familyMembers[0];
+
+    if (!familyMember)
+      return errorResponse(res, 404, "Family member not found");
+
+    const [responseRows] = await pool.query(
+      "SELECT * FROM responses WHERE familyMemberId = ? AND quisionerId = ? ORDER BY id DESC",
+      [familyMember.id, id]
+    );
+
+    const responseIds = responseRows.map((r) => r.id);
+
+    let answerRows = [];
+    if (responseIds.length > 0) {
+      const [rows] = await pool.query(
+        "SELECT * FROM answers WHERE responseId IN (?) ORDER BY id ASC",
+        [responseIds]
+      );
+      answerRows = rows;
+    }
+
+    const responses = responseRows.map((r) => ({
+      ...r,
+      answers: answerRows
+        .filter((a) => a.responseId === r.id)
+        .map((a) => ({
+          ...a,
+          boolean_value: a.boolean_value === null ? null : !!a.boolean_value,
+        })),
+    }));
+
+    const [questionRows] = await pool.query(
+      "SELECT id, quesioner_id, title, type FROM questions WHERE quesioner_id = ? ORDER BY id ASC",
+      [id]
+    );
+
+    const questionIds = questionRows.map((q) => q.id);
+
+    let optionRows = [];
+    if (questionIds.length > 0) {
+      const [rows] = await pool.query(
+        "SELECT id, question_id, title, score FROM options WHERE question_id IN (?)",
+        [questionIds]
+      );
+      optionRows = rows;
+    }
+
+    const questions = questionRows.map((q) => ({
+      ...q,
+      options: optionRows
+        .filter((o) => o.question_id === q.id)
+        .map((o) => ({ id: o.id, title: o.title, score: o.score })),
+    }));
+
+    return successResponse(
+      res,
+      { responses, questions },
+      "Berhasil mendapatkan riwayat"
+    );
+  } catch (error) {
+    return errorResponse(res, error, "Failed to get response history");
   }
 };
 
@@ -662,6 +770,74 @@ export const showResponseForParent = async (req, res) => {
     );
   } catch (error) {
     return errorResponse(res, error, "Failed to get response");
+  }
+};
+
+export const getResponseHistoryInstitution = async (req, res) => {
+  try {
+    const user = req.user;
+    const quesionerId = Number(req.params.id);
+
+    const institution = await getInstitutionByUser(user.id, user.role);
+
+    if (!institution) return errorResponse(res, 404, "Institution not found");
+
+    const [responseRows] = await pool.query(
+      "SELECT * FROM responses WHERE institutionId = ? AND quisionerId = ? ORDER BY id DESC",
+      [institution.id, quesionerId]
+    );
+
+    const responseIds = responseRows.map((r) => r.id);
+
+    let answerRows = [];
+    if (responseIds.length > 0) {
+      const [rows] = await pool.query(
+        "SELECT * FROM answers WHERE responseId IN (?) ORDER BY id ASC",
+        [responseIds]
+      );
+      answerRows = rows;
+    }
+
+    const responses = responseRows.map((r) => ({
+      ...r,
+      answers: answerRows
+        .filter((a) => a.responseId === r.id)
+        .map((a) => ({
+          ...a,
+          boolean_value: a.boolean_value === null ? null : !!a.boolean_value,
+        })),
+    }));
+
+    const [questionRows] = await pool.query(
+      "SELECT id, quesioner_id, title, type FROM questions WHERE quesioner_id = ? ORDER BY id ASC",
+      [quesionerId]
+    );
+
+    const questionIds = questionRows.map((q) => q.id);
+
+    let optionRows = [];
+    if (questionIds.length > 0) {
+      const [rows] = await pool.query(
+        "SELECT id, question_id, title, score FROM options WHERE question_id IN (?)",
+        [questionIds]
+      );
+      optionRows = rows;
+    }
+
+    const questions = questionRows.map((q) => ({
+      ...q,
+      options: optionRows
+        .filter((o) => o.question_id === q.id)
+        .map((o) => ({ id: o.id, title: o.title, score: o.score })),
+    }));
+
+    return successResponse(
+      res,
+      { responses, questions },
+      "Berhasil mendapatkan riwayat"
+    );
+  } catch (error) {
+    return errorResponse(res, error, "Failed to get response history");
   }
 };
 

@@ -30,7 +30,7 @@ describe("getPartners", () => {
 
     expect(pool.query).toHaveBeenNthCalledWith(
       1,
-      expect.stringContaining("SELECT id FROM institutions WHERE user_id = ? LIMIT 1"),
+      expect.stringContaining("SELECT * FROM institutions WHERE user_id = ? LIMIT 1"),
       ["user-1"]
     );
     expect(res.status).toHaveBeenCalledWith(500);

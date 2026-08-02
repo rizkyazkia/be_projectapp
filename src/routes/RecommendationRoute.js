@@ -17,8 +17,8 @@ import { verifyToken } from "../middelware/verifyToken.js";
 const router = Router();
 
 router.get("/recommendation", verifyToken, getRecomendations);
-router.get("/recommendation/:id", getResponseParent);
 router.get("/recommendation/single/:id", getSingleRecommendation);
+router.get("/recommendation/:id", getResponseParent);
 router.get("/recommendation/institution/:id", getResponseInstitution);
 router.post("/recommendation/user", verifyToken, createRecommendation);
 router.patch("/recommendation/:id", changeStatusToProcessed);

@@ -9,9 +9,9 @@ import { verifyToken } from "../middelware/verifyToken.js";
 
 const router = Router();
 
-router.get("/teachers", getTeachers);
+router.get("/teachers", verifyToken, getTeachers);
 router.post("/teachers", verifyToken, createTeacher);
-router.put("/teachers/:id", updateTeacher);
-router.delete("/teachers/:id", deleteTeacher);
+router.put("/teachers/:id", verifyToken, updateTeacher);
+router.delete("/teachers/:id", verifyToken, deleteTeacher);
 
 export default router;

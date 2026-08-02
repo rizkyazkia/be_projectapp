@@ -217,14 +217,14 @@ export const login = async (req, res) => {
       { id, username, email, role: roleName },
       process.env.APP_ACCESS_TOKEN_SECRET,
       {
-        expiresIn: "15m",
+        expiresIn: process.env?.NODE_ENV === "production" ? 1800 : 3600 * 3,
       }
     );
     const refreshToken = jwt.sign(
       { id, username, email, role: roleName },
       process.env.APP_REFRESH_TOKEN_SECRET,
       {
-        expiresIn: "1d",
+        expiresIn: "7d",
       }
     );
 
@@ -235,9 +235,9 @@ export const login = async (req, res) => {
 
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000,
-      secure: true,
-      sameSite: "none",
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "lax" : "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     });
     return successResponse(res, { accessToken }, "Login berhasil");
   } catch (error) {
@@ -262,10 +262,6 @@ export const logout = async (req, res) => {
 
   await pool.query("UPDATE users SET refresh_token = NULL WHERE id = ?", [id]);
 
-  res.clearCookie("refreshToken", {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-  });
+  res.clearCookie("refreshToken");
   return successResponse(res, null, "Logout berhasil");
 };

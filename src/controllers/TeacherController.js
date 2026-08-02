@@ -2,6 +2,7 @@ import argon2 from "argon2";
 import { randomUUID } from "node:crypto";
 import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
+import { getInstitutionByUser } from "../helpers/InstitutionHelper.js";
 
 export const getTeachers = async (req, res) => {
   const page = Number.parseInt(req.query.page) || 0;
@@ -10,9 +11,19 @@ export const getTeachers = async (req, res) => {
   const offset = limit * page;
 
   try {
+    const user = req.user;
+    const institution = await getInstitutionByUser(user.id);
+    if (!institution) {
+      return errorResponse(res, 404, "Institusi tidak ditemukan");
+    }
+
     const likeParam = `%${search}%`;
     const [[countRows], [teacherRows]] = await Promise.all([
-      pool.query(`SELECT COUNT(*) AS total FROM teachers WHERE fullName LIKE ? OR role LIKE ?`, [likeParam, likeParam]),
+      pool.query(`SELECT COUNT(*) AS total FROM teachers WHERE school_id = ? AND (fullName LIKE ? OR role LIKE ?)`, [
+        institution.id,
+        likeParam,
+        likeParam,
+      ]),
       pool.query(
         `SELECT
            t.id, t.fullName, t.role, t.address, t.phone,
@@ -25,10 +36,10 @@ export const getTeachers = async (req, res) => {
          LEFT JOIN institutions i ON i.id = t.school_id
          LEFT JOIN provinces p ON p.id = i.province_id
          LEFT JOIN cities c ON c.id = i.city_id
-         WHERE t.fullName LIKE ? OR t.role LIKE ?
+         WHERE t.school_id = ? AND (t.fullName LIKE ? OR t.role LIKE ?)
          ORDER BY t.id DESC
          LIMIT ? OFFSET ?`,
-        [likeParam, likeParam, limit, offset]
+        [institution.id, likeParam, likeParam, limit, offset]
       ),
     ]);
 
@@ -125,10 +136,13 @@ export const createTeacher = async (req, res) => {
 
       await pool.query(`UPDATE classes SET teacher_id = ? WHERE id = ?`, [teacherId, classId]);
 
-      // Preserved bug: the original passed the exported `updateTeacher` function
-      // itself here (hoisted reference, not the local result), which
-      // JSON.stringify()s to undefined — so `data` is omitted from the response.
-      return successResponse(res, undefined, "Berhasil menambahkan wali kelas");
+      const [updateUserRows] = await pool.query(`SELECT id, username, email, role_id FROM users WHERE id = ? LIMIT 1`, [
+        existingUser.id,
+      ]);
+      const [updateTeacherRows] = await pool.query(`SELECT * FROM teachers WHERE id = ? LIMIT 1`, [teacherId]);
+      const updateUser = { ...updateUserRows[0], teacher: updateTeacherRows[0] };
+
+      return successResponse(res, updateUser, "Berhasil menambahkan wali kelas");
     } else {
       const userId = randomUUID();
       await pool.query(`INSERT INTO users (id, username, email, password, role_id) VALUES (?, ?, ?, ?, ?)`, [
@@ -163,11 +177,21 @@ export const updateTeacher = async (req, res) => {
   const { role, address, phone } = req.body;
 
   try {
+    const user = req.user;
+    const institution = await getInstitutionByUser(user.id);
+    if (!institution) {
+      return errorResponse(res, 404, "Institusi tidak ditemukan");
+    }
+
     const [teacherRows] = await pool.query(`SELECT * FROM teachers WHERE id = ? LIMIT 1`, [id]);
     const existingTeacher = teacherRows[0];
 
     if (!existingTeacher) {
       return errorResponse(res, 404, "Guru tidak ditemukan");
+    }
+
+    if (existingTeacher.school_id !== institution.id) {
+      return errorResponse(res, 403, "Guru bukan milik sekolah anda");
     }
 
     const [oldClassRows] = await pool.query(`SELECT * FROM classes WHERE teacher_id = ? LIMIT 1`, [id]);
@@ -201,11 +225,21 @@ export const deleteTeacher = async (req, res) => {
   const { id } = req.params;
 
   try {
+    const user = req.user;
+    const institution = await getInstitutionByUser(user.id);
+    if (!institution) {
+      return errorResponse(res, 404, "Institusi tidak ditemukan");
+    }
+
     const [teacherRows] = await pool.query(`SELECT * FROM teachers WHERE id = ? LIMIT 1`, [id]);
     const existingTeacher = teacherRows[0];
 
     if (!existingTeacher) {
       return errorResponse(res, 404, "Guru tidak ditemukan");
+    }
+
+    if (existingTeacher.school_id !== institution.id) {
+      return errorResponse(res, 403, "Guru bukan milik sekolah anda");
     }
 
     if (existingTeacher.user_id) {

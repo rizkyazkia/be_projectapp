@@ -16,6 +16,8 @@ import {
   getParentsByFamilyMemberId,
   createFamilyMember,
   updateFamilyMember,
+  addMeasurement,
+  getNutritionHistory,
   deleteFamilyMember,
 } from "../FamilyController.js";
 
@@ -125,9 +127,11 @@ describe("getFamilyMemberByUser", () => {
             nu_height: 90,
             nu_weight: 12,
             nu_bmi: 14.8,
+            nu_measurementDate: "2026-08-01T00:00:00.000Z",
             ns_id: 1,
             ns_information: "info",
             ns_displayName: "Gizi Baik",
+            mp_label: "Agustus 2026",
             st_id: "student-1",
             st_nis: "12345",
             st_schoolYear: "2025/2026",
@@ -202,7 +206,9 @@ describe("getFamilyMemberByUser", () => {
           height: 90,
           weight: 12,
           bmi: 14.8,
+          measurementDate: "2026-08-01T00:00:00.000Z",
           nutritionStatus: { id: 1, information: "info", displayName: "Gizi Baik" },
+          monitoringPeriod: { label: "Agustus 2026" },
         },
       ],
       student: {
@@ -813,7 +819,7 @@ describe("updateFamilyMember", () => {
       .mockResolvedValueOnce([
         [{ id: "fm-1", fullName: "Old Name", gender: "L", birthDate: null }],
         [],
-      ]) // fetch familyMember + nutrition + student (both empty via LEFT JOIN => no nu_id/st_id keys)
+      ]) // fetch familyMember + student (empty via LEFT JOIN => no st_id key)
       .mockResolvedValueOnce([{ affectedRows: 1 }]) // UPDATE family_members (allow-listed fields only)
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // final UPDATE isCompleted
 
@@ -867,29 +873,33 @@ describe("updateFamilyMember", () => {
     );
   });
 
-  it("updates nutrition height/weight/bmi/nutritionStatusId when type is anak and a nutrition row exists", async () => {
+  it("inserts a new nutrition row tied to the current monitoring period when type is anak and height/weight are provided", async () => {
+    // `nutritions.familyMemberId` is no longer unique, so this always INSERTs
+    // a fresh measurement row for the current monitoring period rather than
+    // updating a pre-existing one.
     pool.query
       .mockResolvedValueOnce([
         [
           {
             id: "fm-1",
+            familyId: "family-1",
             gender: "L",
             birthDate: new Date("2020-01-01"),
-            nu_id: 9,
-            nu_height: 80,
-            nu_weight: 10,
-            nu_bmi: 15.6,
-            nu_nutritionStatusId: 1,
           },
         ],
         [],
-      ]) // fetch with nutrition present
+      ]) // fetch familyMember + student (no student row)
+      .mockResolvedValueOnce([
+        [{ id: "period-1", familyId: "family-1", label: "Agustus 2026" }],
+        [],
+      ]) // getOrCreateCurrentPeriod: existing period found
       .mockResolvedValueOnce([[{ sdMinus2Min: 14, sdPlus1Max: 20 }], []]) // bmi_references
       .mockResolvedValueOnce([[{ id: 2, status: "GIZI_BAIK" }], []]) // nutrition_status
-      .mockResolvedValueOnce([{ affectedRows: 1 }]) // UPDATE nutritions
+      .mockResolvedValueOnce([{ insertId: 99 }]) // INSERT nutritions
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // final isCompleted UPDATE
 
     const req = {
+      user: { id: "user-1" },
       params: { id: "fm-1" },
       body: { type: "anak", height: "92", weight: "14" },
     };
@@ -897,14 +907,24 @@ describe("updateFamilyMember", () => {
 
     await updateFamilyMember(req, res);
 
+    expect(pool.query).toHaveBeenCalledTimes(6);
     expect(pool.query).toHaveBeenNthCalledWith(
       2,
+      expect.stringContaining(
+        "FROM monitoring_periods WHERE familyId = ? AND label = ?",
+      ),
+      expect.arrayContaining(["family-1"]),
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
       expect.stringContaining("FROM bmi_references WHERE gender = ?"),
       expect.arrayContaining(["L"]),
     );
-    const [nutritionSql, nutritionParams] = pool.query.mock.calls[3];
-    expect(nutritionSql).toContain("UPDATE nutritions SET");
-    expect(nutritionParams[nutritionParams.length - 1]).toBe(9);
+    const [nutritionSql, nutritionParams] = pool.query.mock.calls[4];
+    expect(nutritionSql).toContain("INSERT INTO nutritions");
+    expect(nutritionParams).toEqual(
+      expect.arrayContaining([92, 14, 2, "fm-1", "user-1", "period-1"]),
+    );
     expect(res.status).toHaveBeenCalledWith(200);
   });
 
@@ -965,6 +985,356 @@ describe("updateFamilyMember", () => {
     const body = res.json.mock.calls[0][0];
     expect(body.status).toBe("error");
     expect(body.message).toBe("Gagal mengupdate anggota keluarga");
+  });
+});
+
+describe("addMeasurement", () => {
+  it("returns an error when height or weight is missing, without querying the database", async () => {
+    const req = {
+      user: { id: "user-1", role: "parent" },
+      params: { id: "fm-1" },
+      body: { height: "90" },
+    };
+    const res = mockRes();
+
+    await addMeasurement(req, res);
+
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Height and weight are required",
+      error: null,
+    });
+  });
+
+  it("returns 'Family member not found' when the member does not exist", async () => {
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    const req = {
+      user: { id: "user-1", role: "parent" },
+      params: { id: "missing-id" },
+      body: { height: "90", weight: "13" },
+    };
+    const res = mockRes();
+
+    await addMeasurement(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Family member not found",
+      error: null,
+    });
+  });
+
+  it("rejects with Unauthorized when caller is neither the family owner nor healthcare staff", async () => {
+    pool.query.mockResolvedValueOnce([
+      [{ id: "fm-1", familyId: "family-1", family_userId: "owner-1" }],
+      [],
+    ]);
+
+    const req = {
+      user: { id: "someone-else", role: "parent" },
+      params: { id: "fm-1" },
+      body: { height: "90", weight: "13" },
+    };
+    const res = mockRes();
+
+    await addMeasurement(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Unauthorized",
+      error: 403,
+    });
+  });
+
+  it("records a measurement tied to the current monitoring period and returns it with the joined nutrition status", async () => {
+    pool.query
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "fm-1",
+            familyId: "family-1",
+            family_userId: "user-1",
+            fullName: "Anak Satu",
+            birthDate: "2020-01-01",
+            gender: "L",
+          },
+        ],
+        [],
+      ]) // family member + family lookup
+      .mockResolvedValueOnce([
+        [{ id: "period-1", familyId: "family-1", label: "Agustus 2026" }],
+        [],
+      ]) // getOrCreateCurrentPeriod: existing period found
+      .mockResolvedValueOnce([[{ sdMinus2Min: 14, sdPlus1Max: 20 }], []]) // bmi_references
+      .mockResolvedValueOnce([[{ id: 2, status: "GIZI_BAIK" }], []]) // nutrition_status
+      .mockResolvedValueOnce([{ insertId: 55 }]) // INSERT nutritions
+      .mockResolvedValueOnce([
+        [
+          {
+            id: 55,
+            height: 90,
+            weight: 13,
+            bmi: 16.049382716049383,
+            nutritionStatusId: 2,
+            familyMemberId: "fm-1",
+            createdBy: "user-1",
+            measurementDate: new Date("2026-08-03T00:00:00.000Z"),
+            monitoringPeriodId: "period-1",
+            ns_displayName: "Gizi Baik",
+            ns_information: "Status gizi baik",
+          },
+        ],
+        [],
+      ]); // final SELECT joined with nutrition_status
+
+    const req = {
+      user: { id: "user-1", role: "parent" },
+      params: { id: "fm-1" },
+      body: { height: "90", weight: "13" },
+    };
+    const res = mockRes();
+
+    await addMeasurement(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(6);
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("FROM monitoring_periods WHERE familyId = ? AND label = ?"),
+      expect.arrayContaining(["family-1"]),
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("FROM bmi_references WHERE gender = ?"),
+      expect.arrayContaining(["L"]),
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      5,
+      expect.stringContaining("INSERT INTO nutritions"),
+      expect.arrayContaining([90, 13, 2, "fm-1", "user-1", "period-1"]),
+    );
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.json.mock.calls[0][0];
+    expect(body.message).toBe("Measurement added successfully");
+    expect(body.data).toEqual({
+      id: 55,
+      height: 90,
+      weight: 13,
+      bmi: 16.049382716049383,
+      nutritionStatusId: 2,
+      familyMemberId: "fm-1",
+      createdBy: "user-1",
+      measurementDate: new Date("2026-08-03T00:00:00.000Z"),
+      monitoringPeriodId: "period-1",
+      nutritionStatus: {
+        displayName: "Gizi Baik",
+        information: "Status gizi baik",
+      },
+    });
+  });
+
+  it("returns an error response when a query fails", async () => {
+    pool.query.mockRejectedValueOnce(new Error("db down"));
+
+    const req = {
+      user: { id: "user-1", role: "parent" },
+      params: { id: "fm-1" },
+      body: { height: "90", weight: "13" },
+    };
+    const res = mockRes();
+
+    await addMeasurement(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    const body = res.json.mock.calls[0][0];
+    expect(body.status).toBe("error");
+    expect(body.message).toBe("Failed to add measurement");
+  });
+});
+
+describe("getNutritionHistory", () => {
+  it("returns 'Family member not found' when the member does not exist", async () => {
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    const req = {
+      user: { id: "user-1", role: "parent" },
+      params: { id: "missing-id" },
+    };
+    const res = mockRes();
+
+    await getNutritionHistory(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Family member not found",
+      error: null,
+    });
+  });
+
+  it("rejects with Unauthorized when caller is not the family owner, healthcare, or school", async () => {
+    pool.query.mockResolvedValueOnce([
+      [{ id: "fm-1", family_userId: "owner-1", fullName: "Anak Satu" }],
+      [],
+    ]);
+
+    const req = {
+      user: { id: "someone-else", role: "parent" },
+      params: { id: "fm-1" },
+    };
+    const res = mockRes();
+
+    await getNutritionHistory(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Unauthorized",
+      error: 403,
+    });
+  });
+
+  it("allows a healthcare user who is not the family owner to read the history when linked via a recommendation", async () => {
+    pool.query
+      .mockResolvedValueOnce([
+        [{ id: "fm-1", family_userId: "owner-1", fullName: "Anak Satu" }],
+        [],
+      ])
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // getInstitutionByUser
+      .mockResolvedValueOnce([[{ 1: 1 }], []]) // isChildLinkedToInstitution -> linked
+      .mockResolvedValueOnce([[], []]);
+
+    const req = {
+      user: { id: "someone-else", role: "healthcare" },
+      params: { id: "fm-1" },
+    };
+    const res = mockRes();
+
+    await getNutritionHistory(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(4);
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  it("rejects a healthcare user who is not linked to the family via any recommendation", async () => {
+    pool.query
+      .mockResolvedValueOnce([
+        [{ id: "fm-1", family_userId: "owner-1", fullName: "Anak Satu" }],
+        [],
+      ])
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // getInstitutionByUser
+      .mockResolvedValueOnce([[], []]); // isChildLinkedToInstitution -> not linked
+
+    const req = {
+      user: { id: "someone-else", role: "healthcare" },
+      params: { id: "fm-1" },
+    };
+    const res = mockRes();
+
+    await getNutritionHistory(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "error", message: "Unauthorized" }),
+    );
+  });
+
+  it("returns the measurement history ordered by measurementDate with joined nutrition status and period label", async () => {
+    pool.query
+      .mockResolvedValueOnce([
+        [{ id: "fm-1", family_userId: "user-1", fullName: "Anak Satu" }],
+        [],
+      ])
+      .mockResolvedValueOnce([
+        [
+          {
+            id: 1,
+            measurementDate: new Date("2026-07-01T00:00:00.000Z"),
+            height: 85,
+            weight: 11,
+            bmi: 15.2,
+            ns_displayName: "Gizi Baik",
+            ns_information: "info",
+            mp_label: "Juli 2026",
+          },
+          {
+            id: 2,
+            measurementDate: new Date("2026-08-01T00:00:00.000Z"),
+            height: 90,
+            weight: 13,
+            bmi: 16.05,
+            ns_displayName: null,
+            ns_information: null,
+            mp_label: "Agustus 2026",
+          },
+        ],
+        [],
+      ]);
+
+    const req = {
+      user: { id: "user-1", role: "parent" },
+      params: { id: "fm-1" },
+    };
+    const res = mockRes();
+
+    await getNutritionHistory(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("ORDER BY n.measurementDate ASC"),
+      ["fm-1"],
+    );
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.json.mock.calls[0][0];
+    expect(body.message).toBe("Nutrition history retrieved successfully");
+    expect(body.data).toEqual({
+      childId: "fm-1",
+      childName: "Anak Satu",
+      history: [
+        {
+          id: 1,
+          measurementDate: new Date("2026-07-01T00:00:00.000Z"),
+          height: 85,
+          weight: 11,
+          bmi: 15.2,
+          nutritionStatus: "Gizi Baik",
+          period: "Juli 2026",
+        },
+        {
+          id: 2,
+          measurementDate: new Date("2026-08-01T00:00:00.000Z"),
+          height: 90,
+          weight: 13,
+          bmi: 16.05,
+          nutritionStatus: null,
+          period: "Agustus 2026",
+        },
+      ],
+    });
+  });
+
+  it("returns an error response when a query fails", async () => {
+    pool.query.mockRejectedValueOnce(new Error("db down"));
+
+    const req = {
+      user: { id: "user-1", role: "parent" },
+      params: { id: "fm-1" },
+    };
+    const res = mockRes();
+
+    await getNutritionHistory(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    const body = res.json.mock.calls[0][0];
+    expect(body.status).toBe("error");
+    expect(body.message).toBe("Failed to get nutrition history");
   });
 });
 

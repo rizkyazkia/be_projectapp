@@ -8,6 +8,7 @@ vi.mock("node:crypto", () => ({
 }));
 
 import pool from "../../config/db.js";
+import { getPeriodLabelShort } from "../../helpers/MonitoringHelper.js";
 import {
   getResponseQuesioner,
   createResponseQuesioner,
@@ -16,6 +17,8 @@ import {
   getResponseQuesionerInstitution,
   createResponseQuesionerInstitution,
   checkAnsweredQuesionerInstitution,
+  getResponseHistory,
+  getResponseHistoryInstitution,
   showResponseForParent,
   showResponseForInstitution,
 } from "../ResponseQuesionerController.js";
@@ -210,7 +213,7 @@ describe("getResponseQuesioner", () => {
 describe("createResponseQuesioner", () => {
   const UUID = "11111111-1111-1111-1111-111111111111";
 
-  it("inserts the response, bulk-inserts answers, and updates totalScore", async () => {
+  it("inserts the response (stamped with the current monitoring period's label), bulk-inserts answers, and updates totalScore", async () => {
     const req = {
       user: { id: "user-1" },
       params: { id: "5" },
@@ -229,6 +232,10 @@ describe("createResponseQuesioner", () => {
         [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
         [],
       ]) // family_members
+      .mockResolvedValueOnce([
+        [{ id: "period-1", familyId: "family-1", label: "Agustus 2026" }],
+        [],
+      ]) // monitoring_periods (existing period found)
       .mockResolvedValueOnce([{ affectedRows: 1, insertId: 0 }]) // INSERT responses
       .mockResolvedValueOnce([{ affectedRows: 2 }]) // bulk INSERT answers
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE responses totalScore
@@ -237,11 +244,16 @@ describe("createResponseQuesioner", () => {
 
     expect(pool.query).toHaveBeenNthCalledWith(
       3,
-      expect.stringContaining("INSERT INTO responses"),
-      [UUID, 5, 0, "member-1", null]
+      expect.stringContaining("FROM monitoring_periods WHERE familyId"),
+      ["family-1", expect.any(String)]
     );
     expect(pool.query).toHaveBeenNthCalledWith(
       4,
+      expect.stringContaining("INSERT INTO responses"),
+      [UUID, 5, 0, "member-1", null, "Agustus 2026"]
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      5,
       expect.stringContaining("INSERT INTO answers"),
       [
         [
@@ -251,7 +263,7 @@ describe("createResponseQuesioner", () => {
       ]
     );
     expect(pool.query).toHaveBeenNthCalledWith(
-      5,
+      6,
       expect.stringContaining("UPDATE responses SET totalScore"),
       [4, UUID]
     );
@@ -262,6 +274,34 @@ describe("createResponseQuesioner", () => {
         status: "success",
         data: { count: 2 },
       })
+    );
+  });
+
+  it("stamps periodLabel via getPeriodLabelShort (no monitoring_periods lookup) for a school-role user", async () => {
+    const req = {
+      user: { id: "user-1", role: "school" },
+      params: { id: "5" },
+      body: { answers: [] },
+    };
+    const res = mockRes();
+    const expectedLabel = getPeriodLabelShort(new Date());
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []]) // families
+      .mockResolvedValueOnce([
+        [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
+        [],
+      ]) // family_members
+      .mockResolvedValueOnce([{ affectedRows: 1, insertId: 0 }]) // INSERT responses
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE responses totalScore
+
+    await createResponseQuesioner(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(4); // no monitoring_periods lookup, no bulk answers insert
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("INSERT INTO responses"),
+      [UUID, 5, 0, "member-1", null, expectedLabel]
     );
   });
 
@@ -281,7 +321,7 @@ describe("createResponseQuesioner", () => {
     expect(res.status).toHaveBeenCalledWith(500);
     expect(res.json).toHaveBeenCalledWith({
       status: "error",
-      message: "Gagal menjawab kuisioner, silahkan diulang",
+      message: "Gagal menjawab kuesioner, silahkan diulang",
       error: "Connection lost",
     });
   });
@@ -332,12 +372,16 @@ describe("createResponseQuesioner", () => {
         [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
         [],
       ])
+      .mockResolvedValueOnce([
+        [{ id: "period-1", familyId: "family-1", label: "Agustus 2026" }],
+        [],
+      ]) // monitoring_periods (existing period found)
       .mockResolvedValueOnce([{ affectedRows: 1, insertId: 0 }]) // INSERT responses
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE responses totalScore (no bulk insert call)
 
     await createResponseQuesioner(req, res);
 
-    expect(pool.query).toHaveBeenCalledTimes(4); // no INSERT INTO answers call
+    expect(pool.query).toHaveBeenCalledTimes(5); // no INSERT INTO answers call
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ data: { count: 0 } })
     );
@@ -355,7 +399,18 @@ describe("checkAnsweredQuesioner", () => {
         [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
         [],
       ])
-      .mockResolvedValueOnce([[{ id: "resp-1", familyMemberId: "member-1" }], []]) // responses, no join
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "resp-1",
+            familyMemberId: "member-1",
+            created_at: "2026-08-01T00:00:00.000Z",
+            totalScore: 9,
+            periodLabel: "2026-08",
+          },
+        ],
+        [],
+      ]) // responses, no join
       .mockResolvedValueOnce([[{ count: 3 }], []]) // totalQuestions
       .mockResolvedValueOnce([[{ count: 3 }], []]); // totalAnswers
 
@@ -367,7 +422,16 @@ describe("checkAnsweredQuesioner", () => {
       expect.stringContaining("FROM responses WHERE familyMemberId"),
       ["member-1", 5]
     );
-    expect(res.json).toHaveBeenCalledWith({ answered: true });
+    expect(res.json).toHaveBeenCalledWith({
+      answered: true,
+      canRefill: true,
+      lastResponse: {
+        id: "resp-1",
+        date: "2026-08-01T00:00:00.000Z",
+        totalScore: 9,
+      },
+      periodLabel: "2026-08",
+    });
   });
 
   it("returns answered:false when counts differ", async () => {
@@ -380,13 +444,60 @@ describe("checkAnsweredQuesioner", () => {
         [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
         [],
       ])
-      .mockResolvedValueOnce([[{ id: "resp-1", familyMemberId: "member-1" }], []])
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "resp-1",
+            familyMemberId: "member-1",
+            created_at: "2026-08-01T00:00:00.000Z",
+            totalScore: 6,
+            periodLabel: "2026-08",
+          },
+        ],
+        [],
+      ])
       .mockResolvedValueOnce([[{ count: 3 }], []])
       .mockResolvedValueOnce([[{ count: 2 }], []]);
 
     await checkAnsweredQuesioner(req, res);
 
-    expect(res.json).toHaveBeenCalledWith({ answered: false });
+    expect(res.json).toHaveBeenCalledWith({
+      answered: false,
+      canRefill: true,
+      lastResponse: {
+        id: "resp-1",
+        date: "2026-08-01T00:00:00.000Z",
+        totalScore: 6,
+      },
+      periodLabel: "2026-08",
+    });
+  });
+
+  it("returns canRefill:true and lastResponse:null when a response row exists but has zero answers", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []])
+      .mockResolvedValueOnce([
+        [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
+        [],
+      ])
+      .mockResolvedValueOnce([
+        [{ id: "resp-1", familyMemberId: "member-1", periodLabel: null }],
+        [],
+      ])
+      .mockResolvedValueOnce([[{ count: 3 }], []]) // totalQuestions
+      .mockResolvedValueOnce([[{ count: 0 }], []]); // totalAnswers
+
+    await checkAnsweredQuesioner(req, res);
+
+    expect(res.json).toHaveBeenCalledWith({
+      answered: false,
+      canRefill: true,
+      lastResponse: null,
+      periodLabel: null,
+    });
   });
 
   it("returns 500 (404-as-error bug) when family not found", async () => {
@@ -757,6 +868,8 @@ describe("createResponseQuesionerInstitution", () => {
     };
     const res = mockRes();
 
+    const expectedLabel = getPeriodLabelShort(new Date());
+
     pool.query
       .mockResolvedValueOnce([[{ id: 1, user_id: "user-1" }], []]) // institutions
       .mockResolvedValueOnce([{ affectedRows: 1, insertId: 0 }]) // INSERT responses
@@ -768,7 +881,7 @@ describe("createResponseQuesionerInstitution", () => {
     expect(pool.query).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining("INSERT INTO responses"),
-      [UUID, 5, 0, null, 1]
+      [UUID, 5, 0, null, 1, expectedLabel]
     );
     expect(pool.query).toHaveBeenNthCalledWith(
       3,
@@ -846,7 +959,7 @@ describe("createResponseQuesionerInstitution", () => {
     expect(res.status).toHaveBeenCalledWith(500);
     expect(res.json).toHaveBeenCalledWith({
       status: "error",
-      message: "Gagal menjawab kuisioner, silahkan diulang",
+      message: "Gagal menjawab kuesioner, silahkan diulang",
       error: "Connection lost",
     });
   });
@@ -860,7 +973,16 @@ describe("checkAnsweredQuesionerInstitution", () => {
     pool.query
       .mockResolvedValueOnce([[{ id: 1, user_id: "user-1" }], []]) // institutions
       .mockResolvedValueOnce([
-        [{ id: "resp-1", institutionId: 1, quisionerId: 5 }],
+        [
+          {
+            id: "resp-1",
+            institutionId: 1,
+            quisionerId: 5,
+            created_at: "2026-08-01T00:00:00.000Z",
+            totalScore: 12,
+            periodLabel: "2026-08",
+          },
+        ],
         [],
       ]) // responses
       .mockResolvedValueOnce([[{ count: 4 }], []]) // totalQuestions
@@ -869,7 +991,16 @@ describe("checkAnsweredQuesionerInstitution", () => {
     await checkAnsweredQuesionerInstitution(req, res);
 
     expect(pool.query).toHaveBeenCalledTimes(4);
-    expect(res.json).toHaveBeenCalledWith({ answered: true });
+    expect(res.json).toHaveBeenCalledWith({
+      answered: true,
+      canRefill: true,
+      lastResponse: {
+        id: "resp-1",
+        date: "2026-08-01T00:00:00.000Z",
+        totalScore: 12,
+      },
+      periodLabel: "2026-08",
+    });
   });
 
   it("returns 500 (404-as-error bug) when institution not found", async () => {
@@ -912,6 +1043,258 @@ describe("checkAnsweredQuesionerInstitution", () => {
     expect(res.json).toHaveBeenCalledWith({
       status: "error",
       message: "Failed to check answered status",
+      error: "Connection lost",
+    });
+  });
+});
+
+describe("getResponseHistory", () => {
+  it("returns every response for the family member, each with its own answers, plus the full question bank", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []]) // families
+      .mockResolvedValueOnce([
+        [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
+        [],
+      ]) // family_members
+      .mockResolvedValueOnce([
+        [
+          { id: "resp-2", familyMemberId: "member-1", quisionerId: 5, periodLabel: "2026-08" },
+          { id: "resp-1", familyMemberId: "member-1", quisionerId: 5, periodLabel: "2026-07" },
+        ],
+        [],
+      ]) // responses, ordered id desc
+      .mockResolvedValueOnce([
+        [
+          {
+            id: 1001,
+            questionId: 10,
+            responseId: "resp-2",
+            option_id: 100,
+            score: 1,
+            boolean_value: 1,
+            scaleValue: null,
+          },
+          {
+            id: 1000,
+            questionId: 10,
+            responseId: "resp-1",
+            option_id: 100,
+            score: 0,
+            boolean_value: 0,
+            scaleValue: null,
+          },
+        ],
+        [],
+      ]) // answers across all responses
+      .mockResolvedValueOnce([
+        [{ id: 10, quesioner_id: 5, title: "Q1", type: "BOOLEAN" }],
+        [],
+      ]) // questions
+      .mockResolvedValueOnce([
+        [{ id: 100, question_id: 10, title: "Yes", score: 1 }],
+        [],
+      ]); // options
+
+    await getResponseHistory(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("ORDER BY id DESC"),
+      ["member-1", 5]
+    );
+    expect(pool.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining("FROM answers WHERE responseId IN"),
+      [["resp-2", "resp-1"]]
+    );
+
+    const payload = res.json.mock.calls[0][0];
+    expect(payload.status).toBe("success");
+    expect(payload.data.responses).toHaveLength(2);
+    expect(payload.data.responses[0].id).toBe("resp-2");
+    expect(payload.data.responses[0].answers).toEqual([
+      {
+        id: 1001,
+        questionId: 10,
+        responseId: "resp-2",
+        option_id: 100,
+        score: 1,
+        boolean_value: true,
+        scaleValue: null,
+      },
+    ]);
+    expect(payload.data.responses[1].answers[0].boolean_value).toBe(false);
+    expect(payload.data.questions).toEqual([
+      {
+        id: 10,
+        quesioner_id: 5,
+        title: "Q1",
+        type: "BOOLEAN",
+        options: [{ id: 100, title: "Yes", score: 1 }],
+      },
+    ]);
+  });
+
+  it("skips the answers query when there are no responses, and the options query when there are no questions", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []])
+      .mockResolvedValueOnce([
+        [{ id: "member-1", familyId: "family-1", relation: "IBU" }],
+        [],
+      ])
+      .mockResolvedValueOnce([[], []]) // no responses
+      .mockResolvedValueOnce([[], []]); // no questions
+
+    await getResponseHistory(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(4); // no answers query, no options query
+    const payload = res.json.mock.calls[0][0];
+    expect(payload.data.responses).toEqual([]);
+    expect(payload.data.questions).toEqual([]);
+  });
+
+  it("returns 500 (404-as-error bug) when family not found", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    await getResponseHistory(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 404, message: "Family not found" })
+    );
+  });
+
+  it("returns 500 (404-as-error bug) when family member not found", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: "family-1", userId: "user-1" }], []])
+      .mockResolvedValueOnce([[], []]); // no family member
+
+    await getResponseHistory(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 404, message: "Family member not found" })
+    );
+  });
+
+  it("returns 500 via the catch block when pool.query rejects unexpectedly", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query.mockRejectedValueOnce(new Error("Connection lost"));
+
+    await getResponseHistory(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Failed to get response history",
+      error: "Connection lost",
+    });
+  });
+});
+
+describe("getResponseHistoryInstitution", () => {
+  it("returns every response for the institution, each with its own answers, plus the full question bank", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, user_id: "user-1" }], []]) // institutions
+      .mockResolvedValueOnce([
+        [{ id: "resp-1", institutionId: 1, quisionerId: 5, periodLabel: "2026-08" }],
+        [],
+      ]) // responses
+      .mockResolvedValueOnce([
+        [
+          {
+            id: 1000,
+            questionId: 10,
+            responseId: "resp-1",
+            option_id: 100,
+            score: 1,
+            boolean_value: 1,
+            scaleValue: null,
+          },
+        ],
+        [],
+      ]) // answers
+      .mockResolvedValueOnce([
+        [{ id: 10, quesioner_id: 5, title: "Q1", type: "BOOLEAN" }],
+        [],
+      ]) // questions
+      .mockResolvedValueOnce([
+        [{ id: 100, question_id: 10, title: "Yes", score: 1 }],
+        [],
+      ]); // options
+
+    await getResponseHistoryInstitution(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("FROM responses WHERE institutionId"),
+      [1, 5]
+    );
+
+    const payload = res.json.mock.calls[0][0];
+    expect(payload.data.responses[0].answers[0].boolean_value).toBe(true);
+    expect(payload.data.questions[0].options).toEqual([
+      { id: 100, title: "Yes", score: 1 },
+    ]);
+  });
+
+  it("skips the answers query when there are no responses, and the options query when there are no questions", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, user_id: "user-1" }], []])
+      .mockResolvedValueOnce([[], []]) // no responses
+      .mockResolvedValueOnce([[], []]); // no questions
+
+    await getResponseHistoryInstitution(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(3);
+    const payload = res.json.mock.calls[0][0];
+    expect(payload.data.responses).toEqual([]);
+    expect(payload.data.questions).toEqual([]);
+  });
+
+  it("returns 500 (404-as-error bug) when institution not found", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query.mockResolvedValueOnce([[], []]);
+
+    await getResponseHistoryInstitution(req, res);
+
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 404, message: "Institution not found" })
+    );
+  });
+
+  it("returns 500 via the catch block when pool.query rejects unexpectedly", async () => {
+    const req = { user: { id: "user-1" }, params: { id: "5" } };
+    const res = mockRes();
+
+    pool.query.mockRejectedValueOnce(new Error("Connection lost"));
+
+    await getResponseHistoryInstitution(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Failed to get response history",
       error: "Connection lost",
     });
   });

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import pool from "../config/db.js";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
+import { getInstitutionByUser } from "../helpers/InstitutionHelper.js";
 
 export const getPartners = async (req, res) => {
   const page = Number.parseInt(req.query.page) || 0;
@@ -10,11 +11,7 @@ export const getPartners = async (req, res) => {
 
   try {
     const user = req.user;
-    const [institutionRows] = await pool.query(
-      "SELECT id FROM institutions WHERE user_id = ? LIMIT 1",
-      [user.id]
-    );
-    const institution = institutionRows[0];
+    const institution = await getInstitutionByUser(user.id, user.role);
 
     if (!institution) return errorResponse(res, null, "Institution not found");
 
@@ -79,11 +76,7 @@ export const addPartners = async (req, res) => {
       );
     }
 
-    const [institutionRows] = await pool.query(
-      "SELECT id FROM institutions WHERE user_id = ? LIMIT 1",
-      [user.id]
-    );
-    const institution = institutionRows[0];
+    const institution = await getInstitutionByUser(user.id, user.role);
 
     if (!institution) return errorResponse(res, null, "Institution not found");
 

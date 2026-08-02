@@ -221,7 +221,11 @@ describe("getStudentByUser", () => {
       .mockResolvedValueOnce([[{ id: 7 }], []]) // institution lookup
       .mockResolvedValueOnce([[{ total: 1 }], []]) // count
       .mockResolvedValueOnce([[fullRow()], []]) // page
-      .mockResolvedValueOnce([[{ studentId: "st-1" }], []]); // active recommendations
+      .mockResolvedValueOnce([
+        [{ id: "rec-1", studentId: "st-1", status: "PENDING" }],
+        [],
+      ]) // recommendations
+      .mockResolvedValueOnce([[], []]); // health quesioner lookup (not found)
 
     const req = {
       user: { id: "user-1", role: "school" },
@@ -246,27 +250,60 @@ describe("getStudentByUser", () => {
     expect(pool.query).toHaveBeenNthCalledWith(
       4,
       expect.stringContaining(
-        "FROM recommendations WHERE studentId IN (?) AND status IN ('PENDING', 'PROCESSED')"
+        "SELECT id, studentId, status FROM recommendations WHERE studentId IN (?)"
       ),
       [["st-1"]]
     );
 
     const [[body]] = res.json.mock.calls;
     expect(body.data.students[0].isRecommending).toBe(true);
+    expect(body.data.students[0].completedRecommendation).toBeNull();
   });
 
-  it("skips the recommendations query when the page has no students", async () => {
+  it("flags completedRecommendation when a COMPLETED recommendation exists for the student", async () => {
     pool.query
       .mockResolvedValueOnce([[{ id: 7 }], []])
-      .mockResolvedValueOnce([[{ total: 0 }], []])
-      .mockResolvedValueOnce([[], []]);
+      .mockResolvedValueOnce([[{ total: 1 }], []])
+      .mockResolvedValueOnce([[fullRow()], []])
+      .mockResolvedValueOnce([
+        [{ id: "rec-9", studentId: "st-1", status: "COMPLETED" }],
+        [],
+      ])
+      .mockResolvedValueOnce([[], []]); // health quesioner lookup (not found)
 
     const req = { user: { id: "user-1", role: "school" }, query: {} };
     const res = mockRes();
 
     await getStudentByUser(req, res);
 
-    expect(pool.query).toHaveBeenCalledTimes(3);
+    const [[body]] = res.json.mock.calls;
+    expect(body.data.students[0].isRecommending).toBe(false);
+    expect(body.data.students[0].completedRecommendation).toEqual({
+      id: "rec-9",
+      status: "COMPLETED",
+    });
+  });
+
+  it("skips the recommendations query when the page has no students, but still runs the school-health lookup", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 7 }], []])
+      .mockResolvedValueOnce([[{ total: 0 }], []])
+      .mockResolvedValueOnce([[], []])
+      .mockResolvedValueOnce([[], []]); // health quesioner lookup (not found)
+
+    const req = { user: { id: "user-1", role: "school" }, query: {} };
+    const res = mockRes();
+
+    await getStudentByUser(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(4);
+    expect(pool.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining(
+        "SELECT id FROM quesioners WHERE title = ? LIMIT 1"
+      ),
+      ["Pelayanan Kesehatan Sekolah"]
+    );
     const [[body]] = res.json.mock.calls;
     expect(body.data.students).toEqual([]);
   });
@@ -276,7 +313,8 @@ describe("getStudentByUser", () => {
       .mockResolvedValueOnce([[{ id: 7 }], []])
       .mockResolvedValueOnce([[{ total: 1 }], []])
       .mockResolvedValueOnce([[fullRow()], []])
-      .mockResolvedValueOnce([[], []]);
+      .mockResolvedValueOnce([[], []]) // recommendations
+      .mockResolvedValueOnce([[], []]); // health quesioner lookup (not found)
 
     const req = { user: { id: "user-1", role: "school" }, query: {} };
     const res = mockRes();
@@ -295,6 +333,143 @@ describe("getStudentByUser", () => {
       expect.stringContaining("INNER JOIN students s ON s.familyMemberId = fm.id"),
       ["%%", 7, 10, 0]
     );
+  });
+
+  it("allows role 'teacher' (not just 'school') and resolves the institution via the teacher's school", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 7 }], []]) // getInstitutionByUser (teacher branch)
+      .mockResolvedValueOnce([[{ total: 0 }], []])
+      .mockResolvedValueOnce([[], []])
+      .mockResolvedValueOnce([[], []]); // health quesioner lookup (not found)
+
+    const req = { user: { id: "user-1", role: "teacher" }, query: {} };
+    const res = mockRes();
+
+    await getStudentByUser(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("JOIN institutions i ON i.id = t.school_id"),
+      ["user-1"]
+    );
+    const [[body]] = res.json.mock.calls;
+    expect(body.status).toBe("success");
+  });
+
+  it("computes a conclusion using family socio-economic/education/questionnaire data and the school health score", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 7 }], []]) // institution lookup
+      .mockResolvedValueOnce([[{ total: 1 }], []]) // count
+      .mockResolvedValueOnce([
+        [
+          fullRow({
+            fm_familyId: "fam-1",
+            ns_displayName: "GIZI BAIK",
+          }),
+        ],
+        [],
+      ]) // page
+      .mockResolvedValueOnce([[], []]) // recommendations (no students matched -> actually st-1 present, so empty means no active/completed)
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "parent-1",
+            familyId: "fam-1",
+            relation: "IBU",
+            education: "S1",
+            residenceStatus: "MILIK_SENDIRI",
+            childrenCount: "SATU",
+            underFiveCount: "TIDAK_ADA",
+            familyIncomeLevel: "LEBIH_DARI_SEPULUH_JUTA",
+          },
+        ],
+        [],
+      ]) // family parent lookup
+      .mockResolvedValueOnce([
+        [
+          {
+            familyMemberId: "parent-1",
+            title: "Kebiasaan Sehari-hari Anak",
+            totalScore: 40,
+          },
+          {
+            familyMemberId: "parent-1",
+            title: "Tingkat Pengetahuan Gizi Seimbang",
+            totalScore: 20,
+          },
+        ],
+        [],
+      ]) // parent questionnaire responses
+      .mockResolvedValueOnce([[{ id: 99 }], []]) // health quesioner found
+      .mockResolvedValueOnce([[{ totalScore: 20 }], []]); // health response >= threshold
+
+    const req = { user: { id: "user-1", role: "school" }, query: {} };
+    const res = mockRes();
+
+    await getStudentByUser(req, res);
+
+    const [[body]] = res.json.mock.calls;
+    const student = body.data.students[0];
+    // all 5 factors good -> "Tidak Berisiko Gizi Lebih"
+    expect(student.conclusion).toBe("Tidak Berisiko Gizi Lebih");
+    // familyId must not leak into the response
+    expect(student.familyId).toBeUndefined();
+  });
+
+  it("concludes 'Gizi Lebih' for OVERWEIGHT-OBESITAS regardless of family/school data", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 7 }], []])
+      .mockResolvedValueOnce([[{ total: 1 }], []])
+      .mockResolvedValueOnce([
+        [fullRow({ fm_familyId: null, ns_displayName: "OVERWEIGHT-OBESITAS" })],
+        [],
+      ])
+      .mockResolvedValueOnce([[], []]) // recommendations
+      .mockResolvedValueOnce([[], []]); // health quesioner lookup (not found)
+
+    const req = { user: { id: "user-1", role: "school" }, query: {} };
+    const res = mockRes();
+
+    await getStudentByUser(req, res);
+
+    const [[body]] = res.json.mock.calls;
+    expect(body.data.students[0].conclusion).toBe("Gizi Lebih");
+  });
+
+  it("concludes 'Berisiko Gizi Lebih' for GIZI BAIK when a parent factor is below threshold", async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 7 }], []])
+      .mockResolvedValueOnce([[{ total: 1 }], []])
+      .mockResolvedValueOnce([
+        [fullRow({ fm_familyId: "fam-2", ns_displayName: "GIZI BAIK" })],
+        [],
+      ])
+      .mockResolvedValueOnce([[], []]) // recommendations
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "parent-2",
+            familyId: "fam-2",
+            relation: "AYAH",
+            education: "SD",
+            residenceStatus: "MENYEWA",
+            childrenCount: "EMPAT_ATAU_LEBIH",
+            underFiveCount: "EMPAT_ATAU_LEBIH",
+            familyIncomeLevel: "KURANG_DARI_LIMA_JUTA",
+          },
+        ],
+        [],
+      ]) // family parent lookup (low socio-economic score -> "Dasar")
+      .mockResolvedValueOnce([[], []]) // no questionnaire responses at all
+      .mockResolvedValueOnce([[], []]); // health quesioner lookup (not found)
+
+    const req = { user: { id: "user-1", role: "school" }, query: {} };
+    const res = mockRes();
+
+    await getStudentByUser(req, res);
+
+    const [[body]] = res.json.mock.calls;
+    expect(body.data.students[0].conclusion).toBe("Berisiko Gizi Lebih");
   });
 
   it("returns a 500 error response when the page query rejects", async () => {

@@ -2,6 +2,7 @@ import pool from "../config/db.js";
 import { randomUUID } from "node:crypto";
 import { errorResponse, successResponse } from "../helpers/ResponseHelper.js";
 import { createNotification } from "./NotificationController.js";
+import { getInstitutionByUser } from "../helpers/InstitutionHelper.js";
 
 export const getRecomendations = async (req, res) => {
   const page = parseInt(req.query.page) || 0;
@@ -10,12 +11,11 @@ export const getRecomendations = async (req, res) => {
 
   try {
     let institution = null;
-    if (req.user?.role === "healthcare" || req.user?.role === "school") {
-      const [instRows] = await pool.query(
-        "SELECT id FROM institutions WHERE user_id = ? LIMIT 1",
-        [req.user.id],
-      );
-      institution = instRows[0] || null;
+    if (
+      req.user?.role === "healthcare" ||
+      ["school", "teacher"].includes(req.user?.role)
+    ) {
+      institution = await getInstitutionByUser(req.user.id, req.user.role);
     }
 
     const joinSql = `
@@ -37,7 +37,7 @@ export const getRecomendations = async (req, res) => {
     if (req.user?.role === "healthcare" && institution) {
       filterSql = "WHERE r.healthcareInstitutionId = ?";
       filterParams = [institution.id];
-    } else if (req.user?.role === "school" && institution) {
+    } else if (["school", "teacher"].includes(req.user?.role) && institution) {
       filterSql = "WHERE si.id = ?";
       filterParams = [institution.id];
     }
@@ -522,13 +522,35 @@ export const createIntervention = async (req, res) => {
   let committed = false;
   try {
     const user = req.user;
-    if (user.role !== "healthcare") {
+    if (!["healthcare", "staff"].includes(user.role)) {
       throw new Error("User not have access to this resource");
     }
     const { id } = req.params;
     if (!id) {
       throw new Error("RecommendationId is required in params");
     }
+
+    const institution = await getInstitutionByUser(user.id, user.role);
+    if (!institution) {
+      return errorResponse(res, 403, "Institution not found");
+    }
+
+    const [recommendationRows] = await pool.query(
+      "SELECT healthcareInstitutionId FROM recommendations WHERE id = ? LIMIT 1",
+      [id],
+    );
+    const recommendation = recommendationRows[0];
+    if (
+      !recommendation ||
+      recommendation.healthcareInstitutionId !== institution.id
+    ) {
+      return errorResponse(
+        res,
+        403,
+        "Recommendation does not belong to your institution",
+      );
+    }
+
     const { content, forType, notes } = req.body;
 
     connection = await pool.getConnection();
@@ -635,6 +657,7 @@ export const getSingleRecommendation = async (req, res) => {
         st.id AS student_id, st.nis AS student_nis, st.schoolYear AS student_schoolYear, st.semester AS student_semester, st.classId AS student_classId,
         cl.id AS class_id, cl.name AS class_name,
         fm.id AS fm_id, fm.fullName AS fm_fullName, fm.birthDate AS fm_birthDate, fm.gender AS fm_gender, fm.relation AS fm_relation, fm.familyId AS fm_familyId,
+        se.id AS se_id, se.address AS se_address,
         f.id AS family_id,
         u.id AS user_id,
         uf.id AS user_family_id
@@ -644,6 +667,7 @@ export const getSingleRecommendation = async (req, res) => {
       LEFT JOIN students st ON st.id = r.studentId
       LEFT JOIN classes cl ON cl.id = st.classId
       LEFT JOIN family_members fm ON fm.id = st.familyMemberId
+      LEFT JOIN socio_economic se ON se.id = fm.socioEconomicId
       LEFT JOIN families f ON f.id = fm.familyId
       LEFT JOIN users u ON u.id = f.userId
       LEFT JOIN families uf ON uf.userId = u.id
@@ -656,9 +680,62 @@ export const getSingleRecommendation = async (req, res) => {
     let recommendation = null;
     if (row) {
       const [interventionRows] = await pool.query(
-        "SELECT * FROM interventions WHERE recommendationId = ?",
+        `SELECT
+          iv.id, iv.recommendationId, iv.forType, iv.options, iv.notes, iv.createdAt, iv.user_id,
+          ivu.username AS ivu_username,
+          ivs.fullName AS ivs_fullName,
+          ivsi.name AS ivsi_name, ivsi.address AS ivsi_address, ivsi.phone AS ivsi_phone,
+          ivsic.name AS ivsic_name,
+          ivi.id AS ivi_id, ivi.name AS ivi_name, ivi.address AS ivi_address, ivi.phone AS ivi_phone, ivi.email AS ivi_email,
+          ivic.name AS ivic_name
+        FROM interventions iv
+        LEFT JOIN users ivu ON ivu.id = iv.user_id
+        LEFT JOIN staffs ivs ON ivs.user_id = ivu.id
+        LEFT JOIN institutions ivsi ON ivsi.id = ivs.healthcare_id
+        LEFT JOIN cities ivsic ON ivsic.id = ivsi.city_id
+        LEFT JOIN institutions ivi ON ivi.user_id = ivu.id
+        LEFT JOIN cities ivic ON ivic.id = ivi.city_id
+        WHERE iv.recommendationId = ?`,
         [id],
       );
+
+      const interventions = interventionRows.map((iv) => ({
+        id: iv.id,
+        recommendationId: iv.recommendationId,
+        forType: iv.forType,
+        options: iv.options,
+        notes: iv.notes,
+        createdAt: iv.createdAt,
+        user_id: iv.user_id,
+        user: {
+          username: iv.ivu_username,
+          staff:
+            iv.ivs_fullName != null
+              ? {
+                  fullName: iv.ivs_fullName,
+                  institution:
+                    iv.ivsi_name != null
+                      ? {
+                          name: iv.ivsi_name,
+                          address: iv.ivsi_address,
+                          phone: iv.ivsi_phone,
+                          city: iv.ivsic_name != null ? { name: iv.ivsic_name } : null,
+                        }
+                      : null,
+                }
+              : null,
+          institution: iv.ivi_id
+            ? {
+                id: iv.ivi_id,
+                name: iv.ivi_name,
+                address: iv.ivi_address,
+                phone: iv.ivi_phone,
+                email: iv.ivi_email,
+                city: iv.ivic_name != null ? { name: iv.ivic_name } : null,
+              }
+            : null,
+        },
+      }));
 
       let siblings = [];
       if (row.user_family_id) {
@@ -679,7 +756,7 @@ export const getSingleRecommendation = async (req, res) => {
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
         submittedBy: { institution: row.si_name != null ? { name: row.si_name } : null },
-        Intervention: interventionRows,
+        Intervention: interventions,
         student: row.student_id
           ? {
               id: row.student_id,
@@ -696,6 +773,7 @@ export const getSingleRecommendation = async (req, res) => {
                     gender: row.fm_gender,
                     relation: row.fm_relation,
                     familyId: row.fm_familyId,
+                    SocioEconomic: row.se_id != null ? { address: row.se_address } : null,
                     family: row.family_id
                       ? {
                           id: row.family_id,
@@ -735,20 +813,10 @@ export const getInterventionsBelongToInstitution = async (req, res) => {
     const keyword = req.query.keyword ?? "";
     const skip = limit * page;
 
-    const [userRows] = await pool.query(
-      `SELECT u.id AS user_id, i.id AS institution_id
-       FROM users u
-       LEFT JOIN institutions i ON i.user_id = u.id
-       WHERE u.id = ? LIMIT 1`,
-      [user.id],
-    );
-    const userInstitution = userRows[0];
-    if (!userInstitution) {
+    const institution = await getInstitutionByUser(user.id, user.role);
+    if (!institution) {
       throw new Error("user not found");
     }
-    // NOTE: if the user exists but has no institution, userInstitution.institution_id
-    // is null and the WHERE below naturally matches nothing (Prisma's equivalent threw
-    // a TypeError here instead — a separate pre-existing bug not covered by this task).
 
     const keywordParams = keyword !== "" ? [`%${keyword}%`] : [];
     const keywordSql = keyword !== "" ? "AND fm.fullName LIKE ?" : "";
@@ -763,11 +831,19 @@ export const getInterventionsBelongToInstitution = async (req, res) => {
         se.address AS se_address,
         of2.id AS of2_id,
         subu_i.id AS subu_i_id, subu_i.name AS subu_i_name,
-        vi.name AS vi_name, vi.address AS vi_address, vi.phone AS vi_phone, vi.email AS vi_email,
+        vi.id AS vi_id, vi.name AS vi_name, vi.address AS vi_address, vi.phone AS vi_phone, vi.email AS vi_email,
+        vic.name AS vic_name,
+        vs.fullName AS vs_fullName,
+        vsi.id AS vsi_id, vsi.name AS vsi_name, vsi.address AS vsi_address, vsi.phone AS vsi_phone,
+        vsic.name AS vsic_name,
         vu.username AS vu_username
       FROM interventions iv
       JOIN users vu ON vu.id = iv.user_id
-      JOIN institutions vi ON vi.user_id = vu.id
+      LEFT JOIN institutions vi ON vi.user_id = vu.id
+      LEFT JOIN cities vic ON vic.id = vi.city_id
+      LEFT JOIN staffs vs ON vs.user_id = vu.id
+      LEFT JOIN institutions vsi ON vsi.id = vs.healthcare_id
+      LEFT JOIN cities vsic ON vsic.id = vsi.city_id
       LEFT JOIN recommendations r ON r.id = iv.recommendationId
       LEFT JOIN students st ON st.id = r.studentId
       LEFT JOIN classes cl ON cl.id = st.classId
@@ -778,7 +854,7 @@ export const getInterventionsBelongToInstitution = async (req, res) => {
       LEFT JOIN families of2 ON of2.userId = ofu.id
       LEFT JOIN users subu ON subu.id = r.submittedById
       LEFT JOIN institutions subu_i ON subu_i.user_id = subu.id
-      WHERE vi.id = ? ${keywordSql}
+      WHERE (vi.id = ? OR vsi.id = ?) ${keywordSql}
         -- createIntervention bulk-inserts both forType rows with one shared \`now\`, so createdAt ties are the norm; iv.id (UUID PK) guarantees exactly one match.
         AND iv.id = (
           SELECT iv2.id FROM interventions iv2
@@ -788,7 +864,7 @@ export const getInterventionsBelongToInstitution = async (req, res) => {
         )
       ORDER BY iv.createdAt DESC
       LIMIT 18446744073709551615 OFFSET ?`,
-      [userInstitution.institution_id, ...keywordParams, skip],
+      [institution.id, institution.id, ...keywordParams, skip],
     );
 
     const familyIds = [...new Set(rows.filter((r) => r.of2_id).map((r) => r.of2_id))];
@@ -837,8 +913,30 @@ export const getInterventionsBelongToInstitution = async (req, res) => {
       options: JSON.parse(row.iv_options),
       createdAt: row.iv_createdAt,
       user: {
-        institution: { name: row.vi_name, address: row.vi_address, phone: row.vi_phone, email: row.vi_email },
+        institution: row.vi_id
+          ? {
+              name: row.vi_name,
+              address: row.vi_address,
+              phone: row.vi_phone,
+              email: row.vi_email,
+              city: row.vic_name != null ? { name: row.vic_name } : null,
+            }
+          : null,
         username: row.vu_username,
+        staff:
+          row.vs_fullName != null
+            ? {
+                fullName: row.vs_fullName,
+                institution: row.vsi_id
+                  ? {
+                      name: row.vsi_name,
+                      address: row.vsi_address,
+                      phone: row.vsi_phone,
+                      city: row.vsic_name != null ? { name: row.vsic_name } : null,
+                    }
+                  : null,
+              }
+            : null,
       },
     }));
 
@@ -877,11 +975,19 @@ export const getInterventionsBelongToFamily = async (req, res) => {
         se.address AS se_address,
         of2.id AS of2_id,
         subu_i.id AS subu_i_id, subu_i.name AS subu_i_name,
-        vi.name AS vi_name, vi.address AS vi_address, vi.phone AS vi_phone, vi.email AS vi_email,
+        vi.id AS vi_id, vi.name AS vi_name, vi.address AS vi_address, vi.phone AS vi_phone, vi.email AS vi_email,
+        vic.name AS vic_name,
+        vs.fullName AS vs_fullName,
+        vsi.id AS vsi_id, vsi.name AS vsi_name, vsi.address AS vsi_address, vsi.phone AS vsi_phone,
+        vsic.name AS vsic_name,
         vu.username AS vu_username
       FROM interventions iv
       JOIN users vu ON vu.id = iv.user_id
       LEFT JOIN institutions vi ON vi.user_id = vu.id
+      LEFT JOIN cities vic ON vic.id = vi.city_id
+      LEFT JOIN staffs vs ON vs.user_id = vu.id
+      LEFT JOIN institutions vsi ON vsi.id = vs.healthcare_id
+      LEFT JOIN cities vsic ON vsic.id = vsi.city_id
       LEFT JOIN recommendations r ON r.id = iv.recommendationId
       LEFT JOIN students st ON st.id = r.studentId
       LEFT JOIN classes cl ON cl.id = st.classId
@@ -944,8 +1050,30 @@ export const getInterventionsBelongToFamily = async (req, res) => {
       options: JSON.parse(row.iv_options),
       createdAt: row.iv_createdAt,
       user: {
-        institution: { name: row.vi_name, email: row.vi_email, address: row.vi_address, phone: row.vi_phone },
+        institution: row.vi_id
+          ? {
+              name: row.vi_name,
+              email: row.vi_email,
+              address: row.vi_address,
+              phone: row.vi_phone,
+              city: row.vic_name != null ? { name: row.vic_name } : null,
+            }
+          : null,
         username: row.vu_username,
+        staff:
+          row.vs_fullName != null
+            ? {
+                fullName: row.vs_fullName,
+                institution: row.vsi_id
+                  ? {
+                      name: row.vsi_name,
+                      address: row.vsi_address,
+                      phone: row.vsi_phone,
+                      city: row.vsic_name != null ? { name: row.vsic_name } : null,
+                    }
+                  : null,
+              }
+            : null,
       },
     }));
 

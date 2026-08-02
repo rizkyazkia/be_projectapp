@@ -185,7 +185,7 @@ model Teacher {
 
 model Class {
   id         Int      @id @default(autoincrement())
-  name       String   @unique @db.VarChar(255)
+  name       String   @db.VarChar(255)
   created_at DateTime @default(now()) @db.Timestamp(2)
   updated_at DateTime @default(now()) @db.Timestamp(2)
   teacher_id String?  @db.VarChar(255)
@@ -195,6 +195,7 @@ model Class {
   students Student[] @relation("ClassStudent")
   institution Institution @relation("ClassInstitution", fields: [school_id], references: [id], onDelete: Cascade)
 
+  @@unique([name, school_id])
   @@map("classes")
 }
 
@@ -208,6 +209,7 @@ model Family {
 
   user         User           @relation("UserFamily", fields: [userId], references: [id], onDelete: Cascade)
   familyMember FamilyMember[] @relation("FamilyMemberFamily")
+  monitoringPeriods MonitoringPeriod[] @relation("FamilyMonitoringPeriod")
 
   @@map("families")
 }
@@ -337,17 +339,20 @@ enum RESIDENCESTATUS {
 }
 model Nutrition {
   id                Int      @id @default(autoincrement()) @db.Int
-  height            Float?    @db.Float
-  weight            Float?    @db.Float
+  height            Float?   @db.Float
+  weight            Float?   @db.Float
   bmi               Float?   @db.Float
-  familyMemberId    String   @unique @db.VarChar(255)
+  familyMemberId    String   @db.VarChar(255)
   createdAt         DateTime @default(now()) @db.Timestamp(2)
   updatedAt         DateTime @default(now()) @db.Timestamp(2)
   createdBy         String   @db.VarChar(255)
   nutritionStatusId Int?     @db.Int
+  measurementDate   DateTime @default(now()) @db.Timestamp(2)
+  monitoringPeriodId String? @db.VarChar(255)
 
   nutritionStatus NutritionStatus? @relation("NutritionStatus", fields: [nutritionStatusId], references: [id], onDelete: SetNull)
   user            User             @relation("UserNutrition", fields: [createdBy], references: [id], onDelete: Cascade)
+  monitoringPeriod MonitoringPeriod? @relation("MonitoringPeriodNutrition", fields: [monitoringPeriodId], references: [id], onDelete: SetNull)
   familyMember    FamilyMember     @relation("FamilyMemberNutrition", fields: [familyMemberId], references: [id], onDelete: Cascade)
 
   @@map("nutritions")
@@ -396,6 +401,7 @@ model Response {
   totalScore     Int?     @default(0) @db.Int
   familyMemberId String?  @db.VarChar(255)
   institutionId  Int?     @db.Int
+  periodLabel    String?  @db.VarChar(191)
 
   quesioner    Quesioner     @relation("QuesionerResponse", fields: [quisionerId], references: [id], onDelete: Cascade)
   answers      Answer[]      @relation("ResponseAnswers")
@@ -547,4 +553,20 @@ model Notification {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("notifications")
+}
+
+model MonitoringPeriod {
+  id        String   @id @default(uuid())
+  familyId  String   @db.VarChar(255)
+  label     String   @db.VarChar(255)
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
+  createdAt DateTime @default(now()) @db.Timestamp(2)
+  updatedAt DateTime @default(now()) @db.Timestamp(2)
+
+  family    Family      @relation("FamilyMonitoringPeriod", fields: [familyId], references: [id], onDelete: Cascade)
+  nutrition Nutrition[] @relation("MonitoringPeriodNutrition")
+
+  @@unique([familyId, label])
+  @@map("monitoring_periods")
 }

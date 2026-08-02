@@ -91,10 +91,12 @@ export const getUserById = async (req, res) => {
          i.name AS institution_name,
          i.address AS institution_address,
          i.email AS institution_email,
-         i.phone AS institution_phone
+         i.phone AS institution_phone,
+         c.name AS institution_city_name
        FROM users u
        JOIN roles r ON r.id = u.role_id
        LEFT JOIN institutions i ON i.user_id = u.id
+       LEFT JOIN cities c ON c.id = i.city_id
        WHERE u.id = ?
        LIMIT 1`,
       [id]
@@ -116,6 +118,9 @@ export const getUserById = async (req, res) => {
             address: row.institution_address,
             email: row.institution_email,
             phone: row.institution_phone,
+            city: row.institution_city_name
+              ? { name: row.institution_city_name }
+              : null,
           }
         : null,
     };

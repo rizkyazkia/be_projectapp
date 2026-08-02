@@ -225,6 +225,35 @@ describe("getRecomendations", () => {
     });
   });
 
+  it("scopes a teacher to their school's institution via getInstitutionByUser's teacher branch", async () => {
+    const req = {
+      user: { id: "u-teacher-1", role: "teacher" },
+      query: { page: "0", limit: "10" },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 9 }], []]) // institution lookup via teachers/school_id join
+      .mockResolvedValueOnce([[{ count: 0 }], []]) // count query
+      .mockResolvedValueOnce([[], []]); // main list query, empty
+
+    await getRecomendations(req, res);
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("FROM teachers t"),
+      ["u-teacher-1"],
+    );
+    expect(pool.query.mock.calls[1][0]).toContain("WHERE si.id = ?");
+    expect(pool.query.mock.calls[1][1]).toEqual([9]);
+    expect(pool.query.mock.calls[2][0]).toContain("WHERE si.id = ?");
+    expect(pool.query.mock.calls[2][1]).toEqual([9, 10, 0]);
+
+    expect(res.status).not.toHaveBeenCalledWith(500);
+    const [data] = res.json.mock.calls[0];
+    expect(data.data.recomend).toEqual([]);
+  });
+
   it("applies no institution filter and skips the nutrition query when no family members are returned", async () => {
     const req = {
       user: { id: "u-admin", role: "admin" },
@@ -657,6 +686,8 @@ describe("createIntervention", () => {
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE status
 
     pool.query
+      .mockResolvedValueOnce([[{ id: 10 }], []]) // getInstitutionByUser
+      .mockResolvedValueOnce([[{ healthcareInstitutionId: 10 }], []]) // recommendation ownership check
       .mockResolvedValueOnce([
         [{ id: "rec-1", fm_id: "fm-1", fm_fullName: "Budi", parent_user_id: "user-parent-1" }],
         [],
@@ -688,6 +719,65 @@ describe("createIntervention", () => {
     expect(data.data).toEqual({ count: 2 });
   });
 
+  it("allows a staff-role user to create an intervention (same access grant as healthcare)", async () => {
+    const req = {
+      user: { id: "user-staff-1", role: "staff" },
+      params: { id: "rec-1" },
+      body: { content: { note: "periksa gizi" }, forType: "PARENT", notes: "catatan" },
+    };
+    const res = mockRes();
+
+    randomUUID.mockReturnValueOnce("iv-uuid-1").mockReturnValueOnce("iv-uuid-2");
+
+    const mockConnection = {
+      beginTransaction: vi.fn(),
+      query: vi.fn(),
+      commit: vi.fn(),
+      rollback: vi.fn(),
+      release: vi.fn(),
+    };
+    pool.getConnection.mockResolvedValueOnce(mockConnection);
+    mockConnection.query
+      .mockResolvedValueOnce([{ affectedRows: 2 }]) // bulk INSERT
+      .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE status
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 20 }], []]) // getInstitutionByUser (staff -> healthcare institution)
+      .mockResolvedValueOnce([[{ healthcareInstitutionId: 20 }], []]) // recommendation ownership check
+      .mockResolvedValueOnce([[], []]) // recommendation -> parent lookup, no parent found
+      ;
+
+    await createIntervention(req, res);
+
+    expect(mockConnection.commit).toHaveBeenCalledTimes(1);
+    expect(res.status).toHaveBeenCalledWith(201);
+    const [data] = res.json.mock.calls[0];
+    expect(data.data).toEqual({ count: 2 });
+  });
+
+  it("rejects a healthcare user whose institution doesn't match the recommendation's institution", async () => {
+    const req = {
+      user: { id: "user-health-2", role: "healthcare" },
+      params: { id: "rec-1" },
+      body: { content: {}, forType: "PARENT", notes: null },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 99 }], []]) // getInstitutionByUser
+      .mockResolvedValueOnce([[{ healthcareInstitutionId: 10 }], []]); // belongs to a different institution
+
+    await createIntervention(req, res);
+
+    expect(pool.getConnection).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "error",
+        message: "Recommendation does not belong to your institution",
+      }),
+    );
+  });
+
   it("returns the guard-clause response without opening a connection when the user is not healthcare", async () => {
     const req = { user: { id: "u1", role: "school" }, params: { id: "rec-1" }, body: {} };
     const res = mockRes();
@@ -716,6 +806,9 @@ describe("createIntervention", () => {
       release: vi.fn(),
     };
     pool.getConnection.mockResolvedValueOnce(mockConnection);
+    pool.query
+      .mockResolvedValueOnce([[{ id: 10 }], []]) // getInstitutionByUser
+      .mockResolvedValueOnce([[{ healthcareInstitutionId: 10 }], []]); // recommendation ownership check
 
     await createIntervention(req, res);
 
@@ -748,7 +841,10 @@ describe("createIntervention", () => {
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE status
 
     const notifyError = new Error("connection lost");
-    pool.query.mockRejectedValueOnce(notifyError); // recommendation -> parent lookup fails post-commit
+    pool.query
+      .mockResolvedValueOnce([[{ id: 10 }], []]) // getInstitutionByUser
+      .mockResolvedValueOnce([[{ healthcareInstitutionId: 10 }], []]) // recommendation ownership check
+      .mockRejectedValueOnce(notifyError); // recommendation -> parent lookup fails post-commit
 
     await createIntervention(req, res);
 
@@ -788,6 +884,8 @@ describe("createIntervention", () => {
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE status
 
     pool.query
+      .mockResolvedValueOnce([[{ id: 10 }], []]) // getInstitutionByUser
+      .mockResolvedValueOnce([[{ healthcareInstitutionId: 10 }], []]) // recommendation ownership check
       .mockResolvedValueOnce([
         [{ id: "rec-1", fm_id: "fm-1", fm_fullName: "Budi", parent_user_id: "user-parent-1" }],
         [],
@@ -839,6 +937,8 @@ describe("getSingleRecommendation", () => {
             fm_gender: "L",
             fm_relation: "ANAK",
             fm_familyId: "fam-1",
+            se_id: 4,
+            se_address: "Jl. Rumah",
             family_id: "fam-1",
             user_id: "user-parent-1",
             user_family_id: "fam-1",
@@ -846,7 +946,32 @@ describe("getSingleRecommendation", () => {
         ],
         [],
       ]) // main row
-      .mockResolvedValueOnce([[{ id: "iv-1", forType: "PARENT" }], []]) // Intervention[]
+      .mockResolvedValueOnce([
+        [
+          {
+            id: "iv-1",
+            recommendationId: "rec-1",
+            forType: "PARENT",
+            options: JSON.stringify({ a: 1 }),
+            notes: "catatan",
+            createdAt: new Date("2026-01-03"),
+            user_id: "user-staff-1",
+            ivu_username: "petugas1",
+            ivs_fullName: "Staff Budi",
+            ivsi_name: "Puskesmas A",
+            ivsi_address: "Jl. B",
+            ivsi_phone: "0800",
+            ivsic_name: "Bandung",
+            ivi_id: null,
+            ivi_name: null,
+            ivi_address: null,
+            ivi_phone: null,
+            ivi_email: null,
+            ivic_name: null,
+          },
+        ],
+        [],
+      ]) // Intervention[] with joined user/staff/institution info
       .mockResolvedValueOnce([
         [{ id: "fm-1", fullName: "Budi", birthDate: new Date("2015-01-01"), gender: "L", relation: "ANAK" }],
         [],
@@ -857,8 +982,32 @@ describe("getSingleRecommendation", () => {
     expect(res.status).toHaveBeenCalledWith(200);
     const [data] = res.json.mock.calls[0];
     expect(data.data.submittedBy).toEqual({ institution: { name: "SD Negeri 1" } });
-    expect(data.data.Intervention).toEqual([{ id: "iv-1", forType: "PARENT" }]);
+    expect(data.data.Intervention).toEqual([
+      {
+        id: "iv-1",
+        recommendationId: "rec-1",
+        forType: "PARENT",
+        options: JSON.stringify({ a: 1 }),
+        notes: "catatan",
+        createdAt: new Date("2026-01-03"),
+        user_id: "user-staff-1",
+        user: {
+          username: "petugas1",
+          staff: {
+            fullName: "Staff Budi",
+            institution: {
+              name: "Puskesmas A",
+              address: "Jl. B",
+              phone: "0800",
+              city: { name: "Bandung" },
+            },
+          },
+          institution: null,
+        },
+      },
+    ]);
     expect(data.data.student.familyMember).not.toHaveProperty("residence");
+    expect(data.data.student.familyMember.SocioEconomic).toEqual({ address: "Jl. Rumah" });
     expect(data.data.student.familyMember.family.user.family.familyMember).toEqual([
       { id: "fm-1", fullName: "Budi", birthDate: new Date("2015-01-01"), gender: "L", relation: "ANAK" },
     ]);
@@ -905,7 +1054,7 @@ describe("getInterventionsBelongToInstitution", () => {
     const res = mockRes();
 
     pool.query
-      .mockResolvedValueOnce([[{ institution_id: 5 }], []]) // userInstitution lookup
+      .mockResolvedValueOnce([[{ id: 5 }], []]) // institution lookup via getInstitutionByUser
       .mockResolvedValueOnce([
         [
           {
@@ -915,7 +1064,9 @@ describe("getInterventionsBelongToInstitution", () => {
             fm_fullName: "Budi", fm_birthDate: new Date("2015-01-01"), fm_gender: "L",
             se_address: "Jl. A", of2_id: "fam-2",
             subu_i_id: 3, subu_i_name: "SD Negeri 1",
-            vi_name: "Puskesmas A", vi_address: "Jl. B", vi_phone: "0800", vi_email: "p@x.com",
+            vi_id: 5, vi_name: "Puskesmas A", vi_address: "Jl. B", vi_phone: "0800", vi_email: "p@x.com",
+            vic_name: "Bandung",
+            vs_fullName: null, vsi_id: null, vsi_name: null, vsi_address: null, vsi_phone: null, vsic_name: null,
             vu_username: "petugas1",
           },
         ],
@@ -925,20 +1076,74 @@ describe("getInterventionsBelongToInstitution", () => {
 
     await getInterventionsBelongToInstitution(req, res);
 
+    expect(pool.query.mock.calls[1][0]).toContain("WHERE (vi.id = ? OR vsi.id = ?)");
     expect(pool.query.mock.calls[1][0]).toContain("iv.id = (");
     expect(pool.query.mock.calls[1][0]).toContain("SELECT iv2.id FROM interventions iv2");
     expect(pool.query.mock.calls[1][0]).toContain("ORDER BY iv2.createdAt DESC, iv2.id DESC\n          LIMIT 1");
     expect(pool.query.mock.calls[1][0]).toContain("LIMIT 18446744073709551615 OFFSET ?");
-    expect(pool.query.mock.calls[1][1]).toEqual([5, 0]);
+    expect(pool.query.mock.calls[1][1]).toEqual([5, 5, 0]);
     expect(pool.query.mock.calls[2][1]).toEqual([["fam-2"]]);
 
     expect(res.status).toHaveBeenCalledWith(200);
     const [data] = res.json.mock.calls[0];
     expect(data.data.totalPages).toBe(Math.ceil(1 / 10)); // length-based, not a real count
     expect(data.data.interventions[0].options).toEqual({ a: 1 });
+    expect(data.data.interventions[0].user.institution).toEqual({
+      name: "Puskesmas A",
+      address: "Jl. B",
+      phone: "0800",
+      email: "p@x.com",
+      city: { name: "Bandung" },
+    });
+    expect(data.data.interventions[0].user.staff).toBeNull();
     expect(
       data.data.interventions[0].recommendation.student.familyMember.family.user.family.familyMember,
     ).toEqual([{ fullName: "Ani" }]);
+  });
+
+  it("resolves the institution via the staffs.healthcare_id OR-branch and surfaces the intervention creator's staff info", async () => {
+    const req = {
+      user: { id: "user-staff-1", role: "staff" },
+      query: { page: "0", limit: "10", keyword: "" },
+    };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ id: 7 }], []]) // institution lookup via getInstitutionByUser's staff branch
+      .mockResolvedValueOnce([
+        [
+          {
+            iv_id: "iv-2", iv_forType: "SCHOOL", iv_notes: null, iv_options: JSON.stringify({ c: 3 }), iv_createdAt: new Date("2026-01-05"),
+            r_id: "rec-2", r_status: "COMPLETED", r_createdAt: new Date("2026-01-04"),
+            st_nis: "54321", cl_id: 2, cl_name: "3A",
+            fm_fullName: "Sari", fm_birthDate: new Date("2016-02-02"), fm_gender: "P",
+            se_address: null, of2_id: null,
+            subu_i_id: 4, subu_i_name: "SD Negeri 2",
+            vi_id: null, vi_name: null, vi_address: null, vi_phone: null, vi_email: null,
+            vic_name: null,
+            vs_fullName: "Staff Budi", vsi_id: 7, vsi_name: "Puskesmas B", vsi_address: "Jl. E", vsi_phone: "0802",
+            vsic_name: "Cimahi",
+            vu_username: "petugas2",
+          },
+        ],
+        [],
+      ]);
+
+    await getInterventionsBelongToInstitution(req, res);
+
+    expect(pool.query.mock.calls[1][1]).toEqual([7, 7, 0]);
+
+    const [data] = res.json.mock.calls[0];
+    expect(data.data.interventions[0].user.institution).toBeNull();
+    expect(data.data.interventions[0].user.staff).toEqual({
+      fullName: "Staff Budi",
+      institution: {
+        name: "Puskesmas B",
+        address: "Jl. E",
+        phone: "0802",
+        city: { name: "Cimahi" },
+      },
+    });
   });
 
   it("appends the keyword LIKE filter only when keyword is non-empty", async () => {
@@ -946,13 +1151,13 @@ describe("getInterventionsBelongToInstitution", () => {
     const res = mockRes();
 
     pool.query
-      .mockResolvedValueOnce([[{ institution_id: 5 }], []])
+      .mockResolvedValueOnce([[{ id: 5 }], []])
       .mockResolvedValueOnce([[], []]);
 
     await getInterventionsBelongToInstitution(req, res);
 
     expect(pool.query.mock.calls[1][0]).toContain("fm.fullName LIKE ?");
-    expect(pool.query.mock.calls[1][1]).toEqual([5, "%Budi%", 0]);
+    expect(pool.query.mock.calls[1][1]).toEqual([5, 5, "%Budi%", 0]);
   });
 
   it("throws when the requesting user does not exist", async () => {
@@ -999,7 +1204,9 @@ describe("getInterventionsBelongToFamily", () => {
           fm_fullName: "Sari", fm_birthDate: new Date("2016-01-01"), fm_gender: "P",
           se_address: "Jl. C", of2_id: null,
           subu_i_id: 2, subu_i_name: "SD Negeri 2",
-          vi_name: "Puskesmas B", vi_address: "Jl. D", vi_phone: "0801", vi_email: "b@x.com",
+          vi_id: 2, vi_name: "Puskesmas B", vi_address: "Jl. D", vi_phone: "0801", vi_email: "b@x.com",
+          vic_name: "Bandung",
+          vs_fullName: null, vsi_id: null, vsi_name: null, vsi_address: null, vsi_phone: null, vsic_name: null,
           vu_username: "petugas2",
         },
       ],
@@ -1016,6 +1223,14 @@ describe("getInterventionsBelongToFamily", () => {
     expect(data.data.totalPages).toBe(1); // interventions.length, NOT Math.ceil(length/limit)
     expect(data.data.interventions[0].recommendation.student.familyMember.family.user.family).toBeNull();
     expect(data.data.interventions[0].options).toEqual({ b: 2 });
+    expect(data.data.interventions[0].user.institution).toEqual({
+      name: "Puskesmas B",
+      email: "b@x.com",
+      address: "Jl. D",
+      phone: "0801",
+      city: { name: "Bandung" },
+    });
+    expect(data.data.interventions[0].user.staff).toBeNull();
   });
 
   it("returns a 500 error response when a query rejects (genuine catch-block path)", async () => {

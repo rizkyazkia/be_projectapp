@@ -30,7 +30,7 @@ export const refreshToken = async (req, res) => {
           { id, username, email, role: roleName },
           process.env.APP_ACCESS_TOKEN_SECRET,
           {
-            expiresIn: "15m",
+            expiresIn: 1800,
           }
         );
         return successResponse(
