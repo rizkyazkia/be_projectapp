@@ -21,33 +21,37 @@ jobs:
         run: |
           npm ci --omit=dev
 
-      - name: Upload prebuilt app via SCP
-        uses: appleboy/scp-action@917f8b81dfc1ccd331fef9e2d61bdc6c8be94634 # v0.1.7
-        with:
-          host: ${{ secrets.RUMAHWEB_SSH_HOST }}
-          port: ${{ secrets.RUMAHWEB_SSH_PORT }}
-          username: ${{ secrets.RUMAHWEB_SSH_USER }}
-          key: ${{ secrets.RUMAHWEB_SSH_KEY }}
-          source: "src/,prisma/,package.json,package-lock.json,node_modules/"
-          target: ${{ secrets.RUMAHWEB_BE_PATH }}
-          strip_components: 0
+      - name: Stage deploy artifact
+        run: |
+          set -e
+          rm -rf .deploy
+          mkdir -p .deploy
+          cp -r src prisma package.json package-lock.json node_modules .deploy/
+          mkdir -p .deploy/tmp
+          date > .deploy/tmp/restart.txt
+          # node_modules is built entirely on the GitHub Actions runner and
+          # uploaded as-is - npm ci is never run on the server itself, since
+          # this host's shared-hosting account can't sustain it (confirmed
+          # with rumahweb support: process/resource limits). The backend has
+          # no Prisma dependency; prisma/schema.prisma and prisma/migrations/
+          # are kept only as historical schema documentation, and any schema
+          # change is applied manually as hand-authored SQL against the
+          # external DB host.
+          #
+          # rumahweb support confirmed SSH/SCP from GitHub Actions is not
+          # reliably supported on this shared-hosting account, and directed
+          # us to FTP instead - hence this step's deploy transport.
+          # tmp/restart.txt is included in the upload itself (rather than a
+          # separate SSH-triggered touch) since Passenger only needs its
+          # mtime bumped, which a fresh upload already does.
 
-      - name: Restart app
-        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+      - name: Deploy via FTP
+        uses: SamKirkland/FTP-Deploy-Action@8e83cea8672e3fbcbb9fdafff34debf6ae4c5f65 # v4.3.5
         with:
-          host: ${{ secrets.RUMAHWEB_SSH_HOST }}
-          port: ${{ secrets.RUMAHWEB_SSH_PORT }}
-          username: ${{ secrets.RUMAHWEB_SSH_USER }}
-          key: ${{ secrets.RUMAHWEB_SSH_KEY }}
-          script: |
-            set -e
-            cd ${{ secrets.RUMAHWEB_BE_PATH }}
-            mkdir -p tmp && touch tmp/restart.txt
-            # node_modules is built entirely on the GitHub Actions runner and
-            # uploaded as-is - npm ci is never run on the server itself, since
-            # this host's shared-hosting account can't sustain it (confirmed
-            # with rumahweb support: process/resource limits). The backend has
-            # no Prisma dependency; prisma/schema.prisma and prisma/migrations/
-            # are kept only as historical schema documentation, and any schema
-            # change is applied manually as hand-authored SQL against the
-            # external DB host.
+          server: ${{ secrets.RUMAHWEB_FTP_HOST }}
+          username: ${{ secrets.RUMAHWEB_FTP_USER }}
+          password: ${{ secrets.RUMAHWEB_FTP_PASSWORD }}
+          port: ${{ secrets.RUMAHWEB_FTP_PORT }}
+          server-dir: ${{ secrets.RUMAHWEB_BE_PATH }}/
+          local-dir: ./.deploy/
+          protocol: ftps
