@@ -6,7 +6,7 @@ on:
   workflow_dispatch: {}
 
 concurrency:
-  group: rumahweb-be-${{ github.ref }}
+  group: rumahweb-be-v2-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
