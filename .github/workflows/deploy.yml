@@ -62,3 +62,9 @@ jobs:
           protocol: ftps
           security: strict
           log-level: standard
+          # FTP-Deploy-Action excludes node_modules by default; the previous
+          # step builds node_modules specifically to be uploaded as-is, so
+          # that default exclusion must be turned off.
+          exclude: |
+            **/.git*
+            **/.git*/**
