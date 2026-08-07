@@ -22,4 +22,4 @@ jobs:
           echo "--- Absolute PWD at login (before any cd) ---"
           curl --ftp-ssl -v "ftp://$FTP_HOST:$FTP_PORT/" --user "$FTP_USER:$FTP_PASS" -Q "PWD" -o /dev/null 2>&1 | grep "257"
           echo "--- Absolute PWD inside configured target path ---"
-          curl --ftp-ssl -v "ftp://$FTP_HOST:$FTP_PORT/$FTP_PATH/" --user "$FTP_USER:$FTP_PASS" -Q "PWD" -o /dev/null 2>&1 | grep "257"
+          curl --ftp-ssl -v "ftp://$FTP_HOST:$FTP_PORT/$FTP_PATH/" --user "$FTP_USER:$FTP_PASS" -Q "-PWD" -o /dev/null 2>&1 | grep "257"
