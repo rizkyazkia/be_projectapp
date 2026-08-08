@@ -77,3 +77,48 @@ jobs:
               tar -xzf ~/deploy-be.tar.gz -C '$TARGET_PATH'
               rm ~/deploy-be.tar.gz
             "
+
+      - name: Recycle stale Node worker
+        continue-on-error: true
+        env:
+          SSH_HOST: ${{ secrets.RUMAHWEB_SSH_HOST }}
+          SSH_USER: ${{ secrets.RUMAHWEB_SSH_USER }}
+          SSH_PORT: ${{ secrets.RUMAHWEB_SSH_PORT }}
+          DOMAIN: ${{ secrets.RUMAHWEB_BE_PATH }}
+        run: |
+          set -e
+          # Passenger/LiteSpeed here doesn't replace the old worker on
+          # restart - it spawns a new one alongside it, leaking threads
+          # every deploy. This snapshots pre-deploy worker PIDs, hits the
+          # app once to force a respawn against the fresh restart.txt, and
+          # only kills the old PIDs if a genuinely new one is confirmed up -
+          # never kills blindly, so a slow/failed respawn can't cause downtime.
+          mkdir -p ~/.ssh
+          echo "${{ secrets.RUMAHWEB_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          cat > recycle.sh <<'SCRIPT'
+          #!/bin/bash
+          DOMAIN="$1"
+          PATTERN="lsnode:$HOME/$DOMAIN/"
+          OLD_PIDS=$(pgrep -f "$PATTERN" || true)
+          OLD_COUNT=$(echo "$OLD_PIDS" | grep -c . || true)
+          curl -s -o /dev/null -k "https://$DOMAIN/" || true
+          sleep 4
+          NEW_PIDS=$(pgrep -f "$PATTERN" || true)
+          NEW_COUNT=$(echo "$NEW_PIDS" | grep -c . || true)
+          if [ "$NEW_COUNT" -gt "$OLD_COUNT" ] && [ -n "$OLD_PIDS" ]; then
+            echo "$OLD_PIDS" | while read -r pid; do
+              [ -z "$pid" ] && continue
+              kill "$pid" 2>/dev/null && echo "killed stale worker $pid" || true
+            done
+          else
+            echo "no new worker confirmed (old=$OLD_COUNT new=$NEW_COUNT), skipping cleanup"
+          fi
+          SCRIPT
+
+          scp -i ~/.ssh/deploy_key -P "$SSH_PORT" -o StrictHostKeyChecking=yes \
+            recycle.sh "$SSH_USER@$SSH_HOST:~/recycle-be.sh"
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
+            "$SSH_USER@$SSH_HOST" "bash ~/recycle-be.sh '$DOMAIN'; rm -f ~/recycle-be.sh"
