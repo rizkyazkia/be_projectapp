@@ -42,29 +42,38 @@ jobs:
           # are kept only as historical schema documentation, and any schema
           # change is applied manually as hand-authored SQL against the
           # external DB host.
-          #
-          # rumahweb support confirmed SSH/SCP from GitHub Actions is not
-          # reliably supported on this shared-hosting account, and directed
-          # us to FTP instead - hence this step's deploy transport.
           # tmp/restart.txt is included in the upload itself (rather than a
           # separate SSH-triggered touch) since Passenger only needs its
           # mtime bumped, which a fresh upload already does.
 
-      - name: Deploy via FTP
-        uses: SamKirkland/FTP-Deploy-Action@8e83cea8672e3fbcbb9fdafff34debf6ae4c5f65 # v4.3.5
-        with:
-          server: ${{ secrets.RUMAHWEB_FTP_HOST }}
-          username: ${{ secrets.RUMAHWEB_FTP_USER }}
-          password: ${{ secrets.RUMAHWEB_FTP_PASSWORD }}
-          port: ${{ secrets.RUMAHWEB_FTP_PORT }}
-          server-dir: ${{ secrets.RUMAHWEB_BE_PATH }}/
-          local-dir: ./.deploy/
-          protocol: ftps
-          security: strict
-          log-level: standard
-          # FTP-Deploy-Action excludes node_modules by default; the previous
-          # step builds node_modules specifically to be uploaded as-is, so
-          # that default exclusion must be turned off.
-          exclude: |
-            **/.git*
-            **/.git*/**
+      - name: Deploy via SSH (single tarball)
+        env:
+          SSH_HOST: ${{ secrets.RUMAHWEB_SSH_HOST }}
+          SSH_USER: ${{ secrets.RUMAHWEB_SSH_USER }}
+          SSH_PORT: ${{ secrets.RUMAHWEB_SSH_PORT }}
+          TARGET_PATH: ${{ secrets.RUMAHWEB_BE_PATH }}
+        run: |
+          set -e
+          # node_modules has thousands of small files; uploading file-by-file
+          # over FTP hits this host's FTP session/command-rate limit partway
+          # through every time (same file, every run). Packing the whole
+          # deploy into one tarball and transferring it as a single file over
+          # SSH/SCP avoids that limit entirely - the file-by-file constraint
+          # never applies to what's inside the archive.
+          mkdir -p ~/.ssh
+          echo "${{ secrets.RUMAHWEB_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          tar -czf deploy.tar.gz -C .deploy .
+          scp -i ~/.ssh/deploy_key -P "$SSH_PORT" -o StrictHostKeyChecking=yes \
+            deploy.tar.gz "$SSH_USER@$SSH_HOST:~/deploy-be.tar.gz"
+
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
+            "$SSH_USER@$SSH_HOST" "
+              set -e
+              rm -rf '$TARGET_PATH/node_modules' '$TARGET_PATH/src' '$TARGET_PATH/prisma'
+              mkdir -p '$TARGET_PATH'
+              tar -xzf ~/deploy-be.tar.gz -C '$TARGET_PATH'
+              rm ~/deploy-be.tar.gz
+            "
