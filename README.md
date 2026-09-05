@@ -12,7 +12,6 @@ Jalinan Anak Sehat ("Connected Healthy Children") is a child health and nutritio
 - **Auth**: JSON Web Tokens (access + refresh), `argon2` password hashing, httpOnly cookie-based refresh tokens
 - **Validation**: Joi
 - **Testing**: Vitest
-- **Deployment**: GitHub Actions to rumahweb shared hosting (cPanel Node.js Selector)
 
 ## Features
 
@@ -121,8 +120,6 @@ src/
   validators/            # Joi validation schemas
   helpers/
     ResponseHelper.js     # Consistent success/error response envelopes
-.github/workflows/
-  deploy.yml             # CI/CD pipeline to rumahweb shared hosting
 ```
 
 ## API Overview
@@ -152,19 +149,9 @@ All routes are mounted under `/api` (see `src/routes/Routes.js`). Route groups, 
 
 Most write and per-user endpoints require a valid JWT access token (`Authorization: Bearer <token>`) via the `verifyToken` middleware; some are additionally restricted to specific roles via `roleBased`.
 
-## Deployment
-
-The app is deployed to rumahweb shared hosting (cPanel Node.js Selector) via the GitHub Actions workflow at `.github/workflows/deploy.yml`, triggered on push to `main` (or manually via `workflow_dispatch`). The pipeline:
-
-1. Installs dependencies (`npm ci --omit=dev`) on the GitHub Actions runner.
-2. Uploads `src/`, `prisma/`, `package.json`, `package-lock.json`, and the built `node_modules/` to the server over SCP.
-3. Restarts the app on the server.
-
-`npm ci` is never run on the shared-hosting server itself, since the hosting account's resource limits can't sustain it; database migrations are applied manually from a local machine against the external database host for the same reason. All destination paths and connection details are supplied via GitHub Actions secrets and are not present in this repository.
-
 ## Prisma to mysql2 Migration
 
-This project was originally built on Prisma ORM, but Prisma's query engine binary turned out to be fundamentally incompatible with rumahweb's shared-hosting environment: it repeatedly crashed under the host's CloudLinux/CageFS process-suspension behavior (`PANIC: timer has gone away`) and exhausted the account's resource limits during engine-binary downloads and connection handling - confirmed with rumahweb support as a shared-hosting limitation, not something fixable from the application side.
+This project was originally built on Prisma ORM, but Prisma's query engine repeatedly crashed under the previous constrained hosting environment (`PANIC: timer has gone away`) and exhausted its resource limits during engine-binary downloads and connection handling.
 
 The entire backend has since been migrated off Prisma to raw parameterized `mysql2` queries against a shared connection pool (`src/config/db.js`):
 

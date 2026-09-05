@@ -17,8 +17,8 @@ async function main() {
   // missing/invalid env var surfaces as a cryptic mysql2 error instead of
   // the clear validateEnv() message. The dynamic import is awaited inside
   // this async function rather than at module top level because some
-  // hosts (e.g. LiteSpeed's Node.js Selector) load the entry file via
-  // require(), which cannot load an ESM graph containing a top-level
+  // hosts load the entry file via require(), which cannot load an ESM
+  // graph containing a top-level
   // await (ERR_REQUIRE_ASYNC_MODULE).
   const { default: Routes } = await import("./routes/Routes.js");
 
