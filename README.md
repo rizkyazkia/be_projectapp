@@ -92,7 +92,7 @@ The server exposes a health check at `GET /api/healthcheck`.
 
 ## Deployment
 
-OpenShip deployment settings are declared in `openship.json`. OpenShip installs production dependencies with npm, runs the API in Docker on Node.js 22, starts it with `npm start`, and routes `api.jalinananaksehat.com` to port `3000`.
+OpenShip deployment settings are declared in `openship.json`. The repository `Dockerfile` installs production dependencies with npm, runs the API as a non-root user on Node.js 22, checks `/api/healthcheck`, and routes `api.jalinananaksehat.com` to port `3000`.
 
 Set these production values in OpenShip's **Configuration → Environment variables** before the first deployment:
 

@@ -1,17 +1,8 @@
 {
   "$schema": "https://openship.io/openship.schema.json",
-  "framework": "express",
+"framework": "docker",
   "packageManager": "npm",
-  "rootDirectory": "./",
-  "installCommand": "npm ci --omit=dev",
-  "startCommand": "npm start",
-  "buildImage": "node:22-bookworm-slim",
-  "productionPaths": [
-    "src",
-    "node_modules",
-    "package.json",
-    "package-lock.json"
-  ],
+"rootDirectory": "./",
   "runtime": "docker",
   "productionMode": "host",
   "port": 3000,
