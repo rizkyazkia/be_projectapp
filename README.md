@@ -90,6 +90,21 @@ npm start
 
 The server exposes a health check at `GET /api/healthcheck`.
 
+## Deployment
+
+OpenShip deployment settings are declared in `openship.json`. OpenShip installs production dependencies with npm, runs the API in Docker on Node.js 22, starts it with `npm start`, and routes `api.jalinananaksehat.com` to port `3000`.
+
+Set these production values in OpenShip's **Configuration → Environment variables** before the first deployment:
+
+| Variable | Secret |
+| --- | --- |
+| `DATABASE_URL` | Yes |
+| `APP_ACCESS_TOKEN_SECRET` | Yes |
+| `APP_REFRESH_TOKEN_SECRET` | Yes |
+| `CORS_ORIGIN` | No |
+
+`NODE_ENV=production` and `PORT=3000` are supplied by `openship.json`. No persistent application volume is required; business data remains in the external MySQL/MariaDB database.
+
 ## Running Tests
 
 Tests are written with [Vitest](https://vitest.dev/) and live alongside the code in `__tests__` directories. Controller tests mock the `mysql2` pool (`src/config/db.js`) so they run without a live database connection.

@@ -1,8 +1,11 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "src/index.js",
   "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
@@ -21,10 +24,10 @@
     "express": "^5.1.0",
     "joi": "^17.13.3",
     "jsonwebtoken": "^9.0.2",
-    "mysql2": "^3.14.0",
-    "nodemon": "^3.1.10"
+    "mysql2": "^3.14.0"
   },
   "devDependencies": {
+    "nodemon": "^3.1.10",
     "vitest": "^4.1.10"
   }
 }

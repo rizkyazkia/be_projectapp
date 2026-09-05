@@ -1,0 +1,33 @@
+{
+  "$schema": "https://openship.io/openship.schema.json",
+  "framework": "express",
+  "packageManager": "npm",
+  "rootDirectory": "./",
+  "installCommand": "npm ci --omit=dev",
+  "startCommand": "npm start",
+  "buildImage": "node:22-bookworm-slim",
+  "productionPaths": [
+    "src",
+    "node_modules",
+    "package.json",
+    "package-lock.json"
+  ],
+  "runtime": "docker",
+  "productionMode": "host",
+  "port": 3000,
+  "volumes": [],
+  "env": {
+    "NODE_ENV": "production",
+    "PORT": "3000"
+  },
+  "domains": [
+    {
+      "domain": "api.jalinananaksehat.com",
+      "port": 3000,
+      "type": "custom"
+    }
+  ],
+  "resources": {
+    "tier": "unlimited"
+  }
+}
