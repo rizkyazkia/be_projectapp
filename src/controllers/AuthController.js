@@ -86,7 +86,12 @@ export const registerInstitution = async (req, res) => {
     );
 
     if (existingUserRows.length > 0) {
-      return errorResponse(res, null, "Username atau email sudah digunakan");
+      return errorResponse(
+        res,
+        null,
+        "Username atau email sudah digunakan",
+        409
+      );
     }
 
     const [existingInstitutionRows] = await pool.query(
@@ -98,7 +103,8 @@ export const registerInstitution = async (req, res) => {
       return errorResponse(
         res,
         null,
-        "Institusi ini sudah digunakan oleh akun lain"
+        "Institusi ini sudah digunakan oleh akun lain",
+        409
       );
     }
 

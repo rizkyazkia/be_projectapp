@@ -331,7 +331,7 @@ describe("registerInstitution", () => {
     await registerInstitution(req, res);
 
     expect(pool.getConnection).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({
       status: "error",
       message: "Username atau email sudah digunakan",
@@ -349,7 +349,7 @@ describe("registerInstitution", () => {
     await registerInstitution(req, res);
 
     expect(pool.getConnection).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({
       status: "error",
       message: "Institusi ini sudah digunakan oleh akun lain",
