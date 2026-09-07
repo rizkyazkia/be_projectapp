@@ -107,17 +107,18 @@ describe("getAdminDashboardSummary", () => {
     );
   });
 
-  it("defaults adminRoleId to -1 when the admin role is missing", async () => {
+  it("defaults adminRoleId to -1 when the admin role is missing, so nothing gets filtered out of userByRole", async () => {
     queueAdminDashboardMocks({ 1: [[], []] });
     const req = mockReq();
     const res = mockRes();
 
     await getAdminDashboardSummary(req, res);
 
-    expect(pool.query).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining("role_id != ?"),
-      [-1],
+    const body = res.json.mock.calls[0][0];
+    // adminRoleId falls back to -1, which doesn't match any real role_id, so
+    // the userByRole breakdown includes every row unfiltered (including "admin").
+    expect(body.data.userByRole).toEqual(
+      expect.arrayContaining([expect.objectContaining({ role: "admin" })]),
     );
   });
 

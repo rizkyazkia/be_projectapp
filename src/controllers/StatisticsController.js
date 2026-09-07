@@ -54,10 +54,12 @@ export const getAdminDashboardSummary = async (req, res) => {
     );
     const adminRoleId = adminRoleRows[0]?.id ?? -1;
 
-    // 2. totalUsers excluding admin
+    // 2. totalUsers - every account, matching the count shown on the
+    // Manajemen Pengguna page (which lists every user including admins).
+    // Previously excluded admin here only, which made this number disagree
+    // with that page's "Total Rows" by exactly the number of admin accounts.
     const [totalUsersRows] = await pool.query(
-      `SELECT COUNT(id) AS count FROM users WHERE role_id != ?`,
-      [adminRoleId],
+      `SELECT COUNT(id) AS count FROM users`,
     );
     const totalUsers = Number(totalUsersRows[0].count);
 
