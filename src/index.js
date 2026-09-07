@@ -21,6 +21,18 @@ async function main() {
   // graph containing a top-level
   // await (ERR_REQUIRE_ASYNC_MODULE).
   const { default: Routes } = await import("./routes/Routes.js");
+  const { checkDbConnection } = await import("./config/db.js");
+
+  try {
+    await checkDbConnection();
+    console.log("Database connection: OK");
+  } catch (err) {
+    console.error(`Database connection failed: ${err.message}`);
+    console.error(
+      "Check DATABASE_URL and make sure this server's IP is allowed to reach the database host."
+    );
+    process.exit(1);
+  }
 
   const app = express();
   app.disable("x-powered-by");
