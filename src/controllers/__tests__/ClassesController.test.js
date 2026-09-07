@@ -141,16 +141,18 @@ describe("getClasses", () => {
 });
 
 describe("createClasses", () => {
-  it("creates every class in the array that doesn't already exist under this school", async () => {
+  it("creates every class in the array when none already exist", async () => {
     const req = { user: { id: "admin-id" }, body: { classes: [{ name: "1A" }, { name: "1B" }] } };
     const res = mockRes();
 
     pool.query
       .mockResolvedValueOnce([[{ institution_id: 5 }], []]) // getUserInstitution
-      .mockResolvedValueOnce([[], []]) // 1A does not exist
+      .mockResolvedValueOnce([[], []]) // check 1A - not found
+      .mockResolvedValueOnce([[], []]) // check 1B - not found
       .mockResolvedValueOnce([{ insertId: 10 }]) // INSERT 1A
       .mockResolvedValueOnce([[{ id: 10, name: "1A", school_id: 5 }], []]) // reselect 1A
-      .mockResolvedValueOnce([[{ id: 99, name: "1B", school_id: 5 }], []]); // 1B already exists -> skipped
+      .mockResolvedValueOnce([{ insertId: 11 }]) // INSERT 1B
+      .mockResolvedValueOnce([[{ id: 11, name: "1B", school_id: 5 }], []]); // reselect 1B
 
     await createClasses(req, res);
 
@@ -159,11 +161,34 @@ describe("createClasses", () => {
       expect.stringContaining("WHERE name = ? AND school_id = ?"),
       ["1A", 5]
     );
-    expect(pool.query).toHaveBeenNthCalledWith(3, expect.stringContaining("INSERT INTO classes"), ["1A", 5]);
+    expect(pool.query).toHaveBeenNthCalledWith(4, expect.stringContaining("INSERT INTO classes"), ["1A", 5]);
     expect(res.json).toHaveBeenCalledWith({
       status: "success",
       message: "Berhasil membuat kelas",
-      data: [{ id: 10, name: "1A", school_id: 5 }],
+      data: [
+        { id: 10, name: "1A", school_id: 5 },
+        { id: 11, name: "1B", school_id: 5 },
+      ],
+    });
+  });
+
+  it("rejects the whole array batch with 409 and inserts nothing when any class in it already exists", async () => {
+    const req = { user: { id: "admin-id" }, body: { classes: [{ name: "1A" }, { name: "1B" }] } };
+    const res = mockRes();
+
+    pool.query
+      .mockResolvedValueOnce([[{ institution_id: 5 }], []]) // getUserInstitution
+      .mockResolvedValueOnce([[], []]) // check 1A - not found
+      .mockResolvedValueOnce([[{ id: 99, name: "1B", school_id: 5 }], []]); // check 1B - already exists
+
+    await createClasses(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(3); // duplicate check short-circuits before any INSERT
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({
+      status: "error",
+      message: "Tidak dapat membuat kelas yang sudah ada",
+      error: "Kelas sudah tersedia: 1B",
     });
   });
 
@@ -173,16 +198,16 @@ describe("createClasses", () => {
 
     pool.query
       .mockResolvedValueOnce([[{ institution_id: 5 }], []])
-      .mockResolvedValueOnce([[], []]) // first "1A" (school 5) not found -> inserted
-      .mockResolvedValueOnce([{ insertId: 10 }])
-      .mockResolvedValueOnce([[{ id: 10, name: "1A", school_id: 5 }], []])
-      .mockResolvedValueOnce([[], []]) // second "1A" under a different school_id also passes the scoped check
-      .mockRejectedValueOnce(new Error("Duplicate entry '1A' for key 'classes.name'")); // raw global-unique INSERT fails
+      .mockResolvedValueOnce([[], []]) // check first "1A" - not found
+      .mockResolvedValueOnce([[], []]) // check second "1A" - also not found (stale read, simulating a race)
+      .mockResolvedValueOnce([{ insertId: 10 }]) // INSERT first "1A"
+      .mockResolvedValueOnce([[{ id: 10, name: "1A", school_id: 5 }], []]) // reselect
+      .mockRejectedValueOnce(new Error("Duplicate entry '1A' for key 'classes.name'")); // second INSERT fails
 
     await createClasses(req, res);
 
     // The first class's INSERT already ran and is not undone (no transaction, no catch inside the loop).
-    expect(pool.query).toHaveBeenNthCalledWith(3, expect.stringContaining("INSERT INTO classes"), ["1A", 5]);
+    expect(pool.query).toHaveBeenNthCalledWith(4, expect.stringContaining("INSERT INTO classes"), ["1A", 5]);
     expect(res.status).toHaveBeenCalledWith(500);
     expect(res.json).toHaveBeenCalledWith({
       status: "error",
@@ -211,7 +236,7 @@ describe("createClasses", () => {
     });
   });
 
-  it("bug: single-object duplicate passes 'already exists' string as the error arg, not the message", async () => {
+  it("rejects a duplicate single-object submission with 409", async () => {
     const req = { user: { id: "admin-id" }, body: { classes: { name: "2A" } } };
     const res = mockRes();
 
@@ -221,11 +246,11 @@ describe("createClasses", () => {
 
     await createClasses(req, res);
 
-    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({
       status: "error",
       message: "Tidak dapat membuat kelas yang sudah ada",
-      error: "Kelas sudah tersedia",
+      error: "Kelas sudah tersedia: 2A",
     });
   });
 
@@ -286,11 +311,11 @@ describe("createClasses", () => {
       expect.stringContaining("WHERE name = ? AND school_id = ?"),
       ["1A", 5]
     );
-    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({
       status: "error",
       message: "Tidak dapat membuat kelas yang sudah ada",
-      error: "Kelas sudah tersedia",
+      error: "Kelas sudah tersedia: 1A",
     });
   });
 });

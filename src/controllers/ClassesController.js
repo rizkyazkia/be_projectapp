@@ -63,47 +63,51 @@ export const getClasses = async (req, res) => {
 
 export const createClasses = async (req, res) => {
   const { classes } = req.body;
+  const isArrayInput = Array.isArray(classes);
+  const classList = isArrayInput ? classes : [classes];
 
   try {
     const school_id = await getUserInstitution(req.user.id);
 
-    if (Array.isArray(classes)) {
-      const createdClasses = [];
-      for (const cls of classes) {
-        const [existingRows] = await pool.query(
-          `SELECT * FROM classes WHERE name = ? AND school_id = ? LIMIT 1`,
-          [cls.name, school_id]
-        );
-
-        if (!existingRows[0]) {
-          const [insertResult] = await pool.query(`INSERT INTO classes (name, school_id) VALUES (?, ?)`, [
-            cls.name,
-            school_id,
-          ]);
-          const [newRows] = await pool.query(`SELECT * FROM classes WHERE id = ? LIMIT 1`, [insertResult.insertId]);
-          createdClasses.push(newRows[0]);
-        }
-      }
-
-      return successResponse(res, createdClasses, "Berhasil membuat kelas");
-    } else {
+    // Check every name in the batch for a duplicate before inserting anything.
+    // Previously an array submission silently skipped duplicates and still
+    // returned 200 with whatever subset was actually new - a duplicate class
+    // name looked like a success with no indication anything was rejected.
+    const duplicateNames = [];
+    for (const cls of classList) {
       const [existingRows] = await pool.query(
         `SELECT * FROM classes WHERE name = ? AND school_id = ? LIMIT 1`,
-        [classes.name, school_id]
+        [cls.name, school_id]
       );
-
       if (existingRows[0]) {
-        return errorResponse(res, "Kelas sudah tersedia", "Tidak dapat membuat kelas yang sudah ada");
+        duplicateNames.push(cls.name);
       }
+    }
 
+    if (duplicateNames.length > 0) {
+      return errorResponse(
+        res,
+        `Kelas sudah tersedia: ${duplicateNames.join(", ")}`,
+        "Tidak dapat membuat kelas yang sudah ada",
+        409
+      );
+    }
+
+    const createdClasses = [];
+    for (const cls of classList) {
       const [insertResult] = await pool.query(`INSERT INTO classes (name, school_id) VALUES (?, ?)`, [
-        classes.name,
+        cls.name,
         school_id,
       ]);
       const [newRows] = await pool.query(`SELECT * FROM classes WHERE id = ? LIMIT 1`, [insertResult.insertId]);
-
-      return successResponse(res, newRows[0], "Berhasil membuat kelas");
+      createdClasses.push(newRows[0]);
     }
+
+    return successResponse(
+      res,
+      isArrayInput ? createdClasses : createdClasses[0],
+      "Berhasil membuat kelas"
+    );
   } catch (error) {
     return errorResponse(res, error, "Internal server error");
   }
