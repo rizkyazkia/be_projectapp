@@ -13,7 +13,7 @@
   },
   "domains": [
     {
-      "domain": "api.jalinananaksehat.com",
+      "domain": "apis.jalinananaksehat.com",
       "port": 3000,
       "type": "custom"
     }
